@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [master, develop]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    # Clipvelope targets macOS 26, which needs the Xcode 26 SDK. Swift checks
+    # availability against the deployment target, so an older image cannot build
+    # this at all -- it is not merely a runtime concern.
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          swift --version
+          echo "developer dir: $(xcode-select -p)"
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          restore-keys: ${{ runner.os }}-spm-
+
+      # The deployment target lives in two places, and this repository has
+      # already shipped a tree where they disagreed and nothing compiled.
+      - name: Deployment targets agree
+        run: |
+          set -euo pipefail
+          pkg=$(swift package describe --type json | python3 -c 'import sys,json; print(json.load(sys.stdin)["platforms"][0]["version"])')
+          plist=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Resources/Info.plist)
+          echo "Package.swift=$pkg  Info.plist=$plist"
+          test "$pkg" = "$plist"
+
+      - name: Property lists are well formed
+        run: plutil -lint Resources/Info.plist Resources/Clipvelope.entitlements
+
+      # Sparkle shows release notes in the update prompt and make-appcast takes
+      # them from CHANGELOG.md, so a version without an entry ships an update
+      # that says nothing.
+      - name: Changelog has an entry for this version
+        run: |
+          set -euo pipefail
+          ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+          grep -q "^## $ver" CHANGELOG.md || { echo "CHANGELOG.md has no '## $ver' section"; exit 1; }
+
+      # Deliberately not SwiftLint or SwiftFormat. Those need a toolchain
+      # dependency and mostly produce style opinions; the compiler already runs
+      # with -warnings-as-errors for anything correctness-adjacent. These three
+      # checks are the ones that actually cause noisy diffs later, and they cost
+      # nothing.
+      # A workflow's shell only runs on a runner, so a typo like an unmatched
+      # quote is invisible until a push fails. That happened twice here before
+      # this step existed.
+      - name: Workflow shell syntax
+        run: ./scripts/check-workflows.sh
+
+      - name: Whitespace hygiene
+        run: |
+          set -uo pipefail
+          fail=0
+          if git grep -nI ' $' -- '*.swift'; then
+            echo "^ trailing whitespace"; fail=1
+          fi
+          if git grep -nIP '\t' -- '*.swift'; then
+            echo "^ tab indentation"; fail=1
+          fi
+          for f in $(git ls-files '*.swift' '*.sh' '*.yml' '*.md'); do
+            if [ -n "$(tail -c1 "$f")" ]; then
+              echo "$f: no trailing newline"; fail=1
+            fi
+          done
+          exit $fail
+
+      # The project builds clean today; keeping it that way is cheaper than
+      # rediscovering later which warnings were already there.
+      - name: Build (warnings are errors)
+        run: swift build -Xswiftc -warnings-as-errors
+
+      # The updater lives behind #if SPARKLE, so the default build never compiles
+      # it. Compiling needs no certificate; only running an app with an embedded
+      # framework does, which is why this stops at the build.
+      - name: Build with the updater
+        run: CLIPVELOPE_SPARKLE=1 swift build -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: ./scripts/test.sh --enable-code-coverage
+
+      - name: Coverage
+        run: |
+          set -euo pipefail
+          {
+            echo '### Test coverage'
+            echo '```'
+            ./scripts/coverage-gate.sh
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/coverage-gate.sh
+
+      - name: Package app bundle
+        run: ./scripts/bundle.sh
+
+      # A bundle that builds but is not actually a menu-bar app is the exact
+      # failure this project already shipped once.
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          APP=dist/Clipvelope.app
+          test -x "$APP/Contents/MacOS/Clipvelope"
+          test -f "$APP/Contents/Info.plist"
+          codesign --verify --strict --verbose=2 "$APP"
+
+          plist="$APP/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "com.mujieha.Clipvelope"
+
+          # The icon is named in Info.plist and copied by bundle.sh; a mismatch
+          # between the two shows up as a blank generic icon and nothing else.
+          icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist")
+          test -f "$APP/Contents/Resources/$icon.icns"
+          echo "bundle looks correct"
+
+      # Catches the app failing before it ever draws anything -- a broken entry
+      # point, a crash in initialisation. --status exits without starting the UI,
+      # so it works on a headless runner.
+      - name: Smoke test the built app
+        run: |
+          set -euo pipefail
+          out=$(dist/Clipvelope.app/Contents/MacOS/Clipvelope --status)
+          echo "$out"
+          echo "$out" | grep -q 'bundle id:        com.mujieha.Clipvelope'
+          echo "$out" | grep -q 'vault directory:'
+
+      # The runner has a window server, so the app can be launched for real.
+      # This is the only check that sees the SwiftUI layer at all.
+      - name: Smoke test the UI
+        run: ./scripts/smoke.sh
+
+      # The disk image is what a user actually downloads, and the script that
+      # builds it can break on its own. It verifies that the image mounts and
+      # holds a usable app and a drag target.
+      - name: Build and verify the disk image
+        run: SKIP_BUILD=yes ./scripts/make-dmg.sh
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: Clipvelope-app
+          path: dist/Clipvelope.app
+          if-no-files-found: error

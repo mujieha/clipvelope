@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Scopes the vault's encryption key to this app in the data protection
+         keychain, so other applications cannot read it.
+
+         $(AppIdentifierPrefix) is Xcode's own token for the team identifier,
+         which it expands when it signs. scripts/bundle.sh substitutes the same
+         token from the OU of the signing certificate, so one file serves both
+         builds: a keychain access group must carry the team identifier.
+
+         This is a restricted entitlement. The kernel kills any process carrying
+         it that is not authorised by an embedded provisioning profile - a
+         signing certificate on its own is not enough - so bundle.sh applies it
+         only when a profile is present. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.mujieha.Clipvelope</string>
+    </array>
+</dict>
+</plist>
