@@ -201,10 +201,23 @@ extension KeyCombo {
 
 // MARK: - Opening the panel
 
-/// Whether the history panel is on screen, reported by the panel itself.
-/// MenuBarExtra offers no way to ask, and no way to open its window either.
+/// Whether the history panel is on screen. MenuBarExtra offers no way to ask,
+/// so the panel's own NSWindow is recorded when the content view lands in it
+/// and its visibility is read directly. A flag set from onAppear/onDisappear
+/// was tried first and stuck at "open": the window is hidden, not closed, when
+/// the panel loses focus, so onDisappear never fires and every later `--open`
+/// became a no-op.
 enum PanelState {
-    static var isOpen = false
+    weak static var window: NSWindow?
+    static var isOpen: Bool { window?.isVisible ?? false }
+}
+
+/// The view MenuKeyHandler installs in the panel; it exists to learn the window.
+final class PanelHostView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window { PanelState.window = window }
+    }
 }
 
 enum PanelOpener {
@@ -286,7 +299,7 @@ struct MenuKeyHandler: NSViewRepresentable {
     let onPreferences: () -> Void
 
     func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
+        let view = PanelHostView(frame: .zero)
         context.coordinator.start(view: view)
         update(context.coordinator)
         return view

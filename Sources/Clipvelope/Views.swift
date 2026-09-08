@@ -619,7 +619,6 @@ struct ClipboardMenuView: View {
         }
         .frame(width: 380)
         .onAppear {
-            PanelState.isOpen = true
             panel = PanelModel()
             // The popover window is created fresh each time the menu opens, so it
             // needs the appearance applied then, not only when the theme changes.
@@ -628,7 +627,6 @@ struct ClipboardMenuView: View {
                 searchFocused = true
             }
         }
-        .onDisappear { PanelState.isOpen = false }
         .onReceive(NotificationCenter.default.publisher(for: .clipvelopeOpen)) { _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 searchFocused = true
@@ -753,6 +751,10 @@ private struct GeneralPane: View {
                 if updater.isAvailable {
                     Button("Check for Updates…") { updater.checkForUpdates() }
                         .disabled(!updater.canCheckForUpdates)
+                    if let notices = Bundle.main.url(forResource: "THIRD-PARTY-LICENSES",
+                                                     withExtension: "md") {
+                        Button("Acknowledgements…") { NSWorkspace.shared.open(notices) }
+                    }
                 }
             } header: {
                 Text("About")
@@ -760,7 +762,8 @@ private struct GeneralPane: View {
                 if updater.isAvailable {
                     Text("Clipvelope checks once a day and tells you when there is a new "
                          + "version. Updates are signed; one that is not signed by this "
-                         + "developer is refused.")
+                         + "developer is refused. Updates are delivered by Sparkle, which is "
+                         + "MIT licensed.")
                 } else {
                     Text("This build does not check for updates.")
                 }

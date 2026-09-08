@@ -2,6 +2,12 @@
 
 Local‑only macOS clipboard manager with encrypted storage.
 
+<p align="center">
+  <img src="docs/images/panel.png" width="380" alt="The history panel: recent items grouped by time, with keyboard shortcuts">
+  &nbsp;&nbsp;
+  <img src="docs/images/preferences.png" width="420" alt="Preferences: theme, launch at login, and the keyboard shortcuts">
+</p>
+
 ## Security / Privacy
 - **Local only**: your clipboard never leaves the machine. No telemetry, no account, no sync.
   A release build contacts exactly one URL — the update feed, once a day, to ask whether a newer
@@ -16,9 +22,18 @@ Local‑only macOS clipboard manager with encrypted storage.
 - **Fail‑safe**: if the vault cannot be decrypted (locked Keychain, denied access, corruption), Clipvelope **stops writing** and tells you, rather than silently starting from empty and overwriting your history.
 - **Skips passwords by default**: content marked concealed by password managers (the `org.nspasteboard.*` convention) is not recorded. You can also ignore specific apps, or pause capture entirely.
 
+## Install
+1. Download `Clipvelope-<version>.dmg` from the [latest release](https://github.com/mujieha/clipvelope/releases/latest).
+2. Open it and drag Clipvelope to Applications.
+3. Launch it. It appears in the menu bar, not the Dock. Press **Control + Option + V**
+   or click the icon.
+
+Releases are signed with a Developer ID and notarized by Apple, so macOS opens
+them without a warning. Updates arrive through the app itself.
+
 ## Requirements
 - macOS 26 (Tahoe)
-- Xcode 26+ (for building/running)
+- Xcode 26+, only to build from source
 
 ## Build & Run (Xcode)
 1. Clone the repo:
@@ -166,5 +181,15 @@ To ship it to other people — a signed, notarized DMG that opens without warnin
 and updates itself — see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 
+## Support and security
+Questions and bugs: [GitHub Issues](https://github.com/mujieha/clipvelope/issues).
+Vulnerabilities: see [SECURITY.md](SECURITY.md); please report privately.
+Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Acknowledgements
+Release builds embed [Sparkle](https://sparkle-project.org) for updates, under the
+MIT license; its notice is in [docs/THIRD-PARTY-LICENSES.md](docs/THIRD-PARTY-LICENSES.md)
+and inside the app under Preferences → General → Acknowledgements.
+
 ## License
-MIT
+MIT. See [LICENSE](LICENSE).

@@ -33,6 +33,8 @@ if otool -L "$APP/Contents/MacOS/Clipvelope" 2>/dev/null | grep -q Sparkle; then
     fi
     mkdir -p "$APP/Contents/Frameworks"
     cp -R "$SPARKLE" "$APP/Contents/Frameworks/"
+    # Sparkle's license requires its notice to travel with the software.
+    cp docs/THIRD-PARTY-LICENSES.md "$APP/Contents/Resources/THIRD-PARTY-LICENSES.md"
     install_name_tool -add_rpath "@executable_path/../Frameworks" \
         "$APP/Contents/MacOS/Clipvelope" 2>/dev/null || true
     echo "embedded $(basename "$SPARKLE")"
