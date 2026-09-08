@@ -7,7 +7,9 @@
 	<key>CFBundleExecutable</key>
 	<string>Clipvelope</string>
 	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
+	<string>Clipvelope</string>
+	<key>CFBundleIconName</key>
+	<string>Clipvelope</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.mujieha.Clipvelope</string>
 	<key>CFBundleName</key>

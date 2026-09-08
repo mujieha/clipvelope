@@ -49,10 +49,27 @@ struct PreferencesButton: View {
 struct StatusItemLabel: View {
     @Environment(\.openSettings) private var openSettings
 
+    /// The sealed envelope from the app icon, as a template so macOS recolours
+    /// it for light and dark menu bars. A bare `swift build` binary has no
+    /// bundle resources; it falls back to a system symbol.
+    private static let icon: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "pdf"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.isTemplate = true
+        image.size = NSSize(width: 18, height: 18)
+        return image
+    }()
+
     var body: some View {
-        // lock.doc rather than doc.on.clipboard, so the menu bar echoes the app
-        // icon: a document that is locked, not two sheets of paper.
-        Label("Clipvelope", systemImage: "lock.doc")
+        Label {
+            Text("Clipvelope")
+        } icon: {
+            if let icon = Self.icon {
+                Image(nsImage: icon)
+            } else {
+                Image(systemName: "envelope.fill")
+            }
+        }
             .onReceive(DistributedNotificationCenter.default()
                 .publisher(for: Diagnostics.preferencesNotification)) { _ in
                 openSettings()

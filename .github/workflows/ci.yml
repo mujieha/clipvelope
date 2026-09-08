@@ -129,10 +129,17 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "com.mujieha.Clipvelope"
 
-          # The icon is named in Info.plist and copied by bundle.sh; a mismatch
-          # between the two shows up as a blank generic icon and nothing else.
+          # The icon is compiled from Resources/Clipvelope.icon by bundle.sh. A
+          # mismatch between Info.plist and the files shows up as a blank generic
+          # icon and nothing else, and an .icns without its 1024 px size shows
+          # up as a blurry one.
           icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist")
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$plist")" = "$icon"
           test -f "$APP/Contents/Resources/$icon.icns"
+          test -f "$APP/Contents/Resources/Assets.car"
+          test -f "$APP/Contents/Resources/MenuBarIcon.pdf"
+          iconutil -c iconset "$APP/Contents/Resources/$icon.icns" -o /tmp/verify.iconset
+          test -f /tmp/verify.iconset/icon_512x512@2x.png
           echo "bundle looks correct"
 
       # Catches the app failing before it ever draws anything -- a broken entry
