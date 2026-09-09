@@ -9,7 +9,10 @@ Local‑only macOS clipboard manager with encrypted storage.
 </p>
 
 ## Security / Privacy
-- **Local only**: your clipboard never leaves the machine. No telemetry, no account, no sync.
+- **Local only**: Clipvelope sends your clipboard nowhere. No telemetry, no account, no sync.
+  The one thing that can put a copy outside this Mac is a feature you turn on yourself: auto backup
+  writes to `~/Documents`, which iCloud copies to your account if you use Desktop & Documents sync.
+  That file is encrypted and its key stays in the local Keychain, so what would sync is ciphertext.
   A release build contacts exactly one URL — the update feed, once a day, to ask whether a newer
   version exists — and sends nothing about you or what you copied. A build without the updater
   (`make app`, and what CI produces) makes no network calls at all, not even from `--status`.
@@ -107,8 +110,10 @@ All in **Preferences → Backup**.
   auto-backup choice, rebind your shortcuts, or add file references. The text is
   kept so you can read it and re-enable Shell yourself for anything you recognise. A keychain backup
   can only have been written by this Mac, so it restores unchanged.
-- **Auto backup**: writes `~/Documents/Clipvelope/clipvelope-backup.cvb` on every change, protected
-  by either the Keychain key or your backup password. In Password mode nothing is written until a
+- **Auto backup** (off unless you turn it on): writes `~/Documents/Clipvelope/clipvelope-backup.cvb`
+  on every change, protected by either the Keychain key or your backup password. Note that
+  `~/Documents` is one of the folders iCloud syncs when Desktop & Documents sync is on, so this is
+  the one setting that can copy your (encrypted) history off this Mac. In Password mode nothing is written until a
   password has been saved; the Backup tab says so rather than silently writing a device-bound file.
 - Every import asks for confirmation first, because it replaces the whole vault, pinned items included.
 

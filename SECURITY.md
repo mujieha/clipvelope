@@ -28,12 +28,18 @@ released, and you will be credited in the changelog unless you prefer not to be.
 
 - History and images are encrypted at rest with AES-GCM; the key lives in the
   macOS Keychain, in the data protection keychain for signed builds.
-- Nothing is sent anywhere. A release build contacts the update feed once a day
-  and sends nothing about the user or the clipboard.
+- Clipvelope transmits nothing. A release build contacts the update feed once a
+  day and sends nothing about the user or the clipboard. Auto backup, which is
+  off until the user enables it, writes an encrypted file to `~/Documents`; if
+  they use iCloud Desktop & Documents sync, that ciphertext is copied to their
+  own iCloud account. Nothing else can leave the machine.
 - A vault that cannot be decrypted is never overwritten.
-- Every encrypted file is bound to its role, the index or the payload of one
-  specific item, so a file the app wrote for one purpose cannot be presented
-  to it as another, and a backup must carry its header.
+- Every encrypted file this version writes is bound to its role, the index or
+  the payload of one specific item, so a file the app wrote for one purpose
+  cannot be presented to it as another, and a backup must carry its header. The
+  one exception is deliberate and single-use: a vault written before 1.0 carries
+  no role, so the first launch after upgrading accepts an unbound index once and
+  immediately rewrites it bound.
 - `Clipvelope --open` and `--preferences` ignore a bare notification on their
   name; a request must carry the token this launch stored in the app's Keychain
   item. Read the first known limit below for what that does and does not buy.
