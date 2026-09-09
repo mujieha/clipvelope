@@ -49,7 +49,7 @@ final class GlobalHotkeyCenter {
         let status = RegisterEventHotKey(combo.keyCode, combo.modifiers, hotKeyID,
                                          GetEventDispatcherTarget(), 0, &ref)
         guard status == noErr else {
-            NSLog("Clipvelope: could not register \(combo.displayName) to open the history (\(status))")
+            NSLog("%@", "Clipvelope: could not register \(combo.displayName) to open the history (\(status))")
             return false
         }
         openRef = ref
@@ -68,11 +68,11 @@ final class GlobalHotkeyCenter {
         for (index, keyCode) in Self.digitKeyCodes.enumerated() {
             if !add(keyCode: keyCode, modifiers: UInt32(optionKey), id: UInt32(index + 1)) {
                 // The rest still work.
-                NSLog("Clipvelope: could not register ⌥\(index + 1)")
+                NSLog("%@", "Clipvelope: could not register ⌥\(index + 1)")
                 unavailable.append(index + 1)
             }
         }
-        NSLog("Clipvelope: registered \(Self.digitKeyCodes.count - unavailable.count) of \(Self.digitKeyCodes.count) quick slot hotkeys")
+        NSLog("%@", "Clipvelope: registered \(Self.digitKeyCodes.count - unavailable.count) of \(Self.digitKeyCodes.count) quick slot hotkeys")
         return unavailable
     }
 

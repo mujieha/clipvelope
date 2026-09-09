@@ -28,7 +28,7 @@ enum RemoteControl {
             token = fresh
         } catch {
             token = nil
-            NSLog("Clipvelope: --open and --preferences are disabled, the Keychain would not hold their token: \(error)")
+            NSLog("%@", "Clipvelope: --open and --preferences are disabled, the Keychain would not hold their token: \(error)")
         }
     }
 

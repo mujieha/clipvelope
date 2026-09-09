@@ -80,7 +80,7 @@ final class KeychainKeyStore {
                     delete(account: account, dataProtection: false)
                     NSLog("Clipvelope: migrated the encryption key to the data protection keychain")
                 } catch {
-                    NSLog("Clipvelope: key migration failed, continuing with the file keychain: \(error)")
+                    NSLog("%@", "Clipvelope: key migration failed, continuing with the file keychain: \(error)")
                 }
                 return SymmetricKey(data: legacy)
             }
@@ -118,7 +118,7 @@ final class KeychainKeyStore {
                       dataProtection: Self.usesDataProtectionKeychain)
             return nil
         } catch {
-            NSLog("Clipvelope: could not save the auto-backup password: \(error)")
+            NSLog("%@", "Clipvelope: could not save the auto-backup password: \(error)")
             return error
         }
     }

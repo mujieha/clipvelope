@@ -101,7 +101,8 @@ All in **Preferences → Backup**.
 - **Portable** — Export… / Import… with a password you choose, stretched with
   **PBKDF2‑HMAC‑SHA256** (600,000 iterations, random 16‑byte salt). Restorable on any Mac.
   Because a portable backup can come from anyone, importing one **disables the Shell flag** on every
-  Quick Slot and folder command it contains, and can never weaken your privacy settings. The text is
+  Quick Slot and folder command it contains, and can never weaken your privacy settings, change your
+  auto-backup choice, rebind your shortcuts, or add file references. The text is
   kept so you can read it and re-enable Shell yourself for anything you recognise. A keychain backup
   can only have been written by this Mac, so it restores unchanged.
 - **Auto backup**: writes `~/Documents/Clipvelope/clipvelope-backup.cvb` on every change, protected

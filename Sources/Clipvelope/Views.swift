@@ -1200,7 +1200,9 @@ private struct BackupPane: View {
             } footer: {
                 Text("Encrypted with a password you choose, so the file can be restored on "
                      + "any Mac. Importing one switches off the shell flag on every command "
-                     + "it contains, and never weakens your privacy settings.")
+                     + "it contains, never weakens your privacy settings, leaves your backup "
+                     + "and shortcut choices alone, and drops file references, which point at "
+                     + "the machine that wrote them.")
             }
 
             Section {

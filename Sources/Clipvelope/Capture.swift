@@ -121,7 +121,7 @@ final class ClipboardMonitor {
         }
         if let string = pb.string(forType: .string), !string.isEmpty {
             guard string.utf8.count <= maxTextBytes else {
-                NSLog("Clipvelope: skipped a \(string.utf8.count)-byte text, over the \(maxTextBytes)-byte limit")
+                NSLog("%@", "Clipvelope: skipped a \(string.utf8.count)-byte text, over the \(maxTextBytes)-byte limit")
                 return nil
             }
             return .text(string)
@@ -138,7 +138,7 @@ final class ClipboardMonitor {
         // text, so it is subject to the same cap. Returning nil here falls
         // through to the plain-text branch, which refuses it for the same reason.
         guard plain.utf8.count <= maxTextBytes else {
-            NSLog("Clipvelope: skipped a rich text whose \(plain.utf8.count)-byte plain rendering is over the \(maxTextBytes)-byte limit")
+            NSLog("%@", "Clipvelope: skipped a rich text whose \(plain.utf8.count)-byte plain rendering is over the \(maxTextBytes)-byte limit")
             return nil
         }
 
@@ -149,7 +149,7 @@ final class ClipboardMonitor {
         for (type, identifier) in candidates {
             guard let data = pb.data(forType: type), !data.isEmpty else { continue }
             guard data.count <= maxRichTextBytes else {
-                NSLog("Clipvelope: \(data.count)-byte \(identifier) is over the limit, keeping plain text")
+                NSLog("%@", "Clipvelope: \(data.count)-byte \(identifier) is over the limit, keeping plain text")
                 return nil
             }
             return .richText(data: data, plainText: plain, typeIdentifier: identifier)
@@ -174,12 +174,12 @@ final class ClipboardMonitor {
         // pasteboard is writable by every process on the machine, and a decoder
         // allocates whatever raster the file's header declares.
         guard raw.count <= maxImageBytes else {
-            NSLog("Clipvelope: skipped a \(raw.count)-byte image, over the \(maxImageBytes)-byte limit")
+            NSLog("%@", "Clipvelope: skipped a \(raw.count)-byte image, over the \(maxImageBytes)-byte limit")
             return nil
         }
         guard let (width, height) = declaredPixelSize(of: raw) else { return nil }
         guard acceptsImage(pixelWidth: width, pixelHeight: height) else {
-            NSLog("Clipvelope: skipped a \(width)x\(height) image, over the \(maxImagePixels)-pixel limit")
+            NSLog("%@", "Clipvelope: skipped a \(width)x\(height) image, over the \(maxImagePixels)-pixel limit")
             return nil
         }
 
@@ -190,7 +190,7 @@ final class ClipboardMonitor {
             guard let rep = NSBitmapImageRep(data: raw),
                   let png = rep.representation(using: .png, properties: [:]) else { return nil }
             guard png.count <= maxImageBytes else {
-                NSLog("Clipvelope: skipped a \(png.count)-byte image, over the \(maxImageBytes)-byte limit")
+                NSLog("%@", "Clipvelope: skipped a \(png.count)-byte image, over the \(maxImageBytes)-byte limit")
                 return nil
             }
             data = png

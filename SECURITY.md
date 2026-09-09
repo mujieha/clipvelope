@@ -38,6 +38,7 @@ released, and you will be credited in the changelog unless you prefer not to be.
   token this launch stored in the app's Keychain item; a bare notification on
   the same name is ignored.
 - Portable backups disable the shell flag on every imported command and cannot
-  weaken privacy settings.
+  weaken privacy settings, change whether or where this Mac writes its own
+  backups, rebind shortcuts, or plant file references.
 
 If you can show one of those claims to be false, that is a vulnerability.

@@ -151,7 +151,7 @@ final class EncryptedStorage {
             try FileManager.default.moveItem(at: source, to: dest)
             return dest
         } catch {
-            NSLog("Clipvelope quarantine error: \(error)")
+            NSLog("%@", "Clipvelope quarantine error: \(error)")
             return nil
         }
     }

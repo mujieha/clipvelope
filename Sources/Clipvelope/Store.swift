@@ -194,7 +194,7 @@ final class ClipboardStore: ObservableObject {
                     + "protect it. This usually means the Keychain was locked or access "
                     + "was denied. (\(error.localizedDescription))"
             )
-            NSLog("Clipvelope: vault unreadable, writes suspended: \(error)")
+            NSLog("%@", "Clipvelope: vault unreadable, writes suspended: \(error)")
         }
         hasLoaded = true
         isLoading = false
@@ -304,7 +304,7 @@ final class ClipboardStore: ObservableObject {
             do {
                 try storage.saveIndex(snapshot)
             } catch {
-                NSLog("Clipvelope save error: \(error)")
+                NSLog("%@", "Clipvelope save error: \(error)")
                 DispatchQueue.main.async {
                     self.storageFailure = StorageFailure(
                         message: "Could not save to your vault. (\(error.localizedDescription))"
@@ -361,7 +361,7 @@ final class ClipboardStore: ObservableObject {
                 do {
                     try storage.writePayload(payloadBytes, for: id)
                 } catch {
-                    NSLog("Clipvelope: could not write payload for \(id): \(error)")
+                    NSLog("%@", "Clipvelope: could not write payload for \(id): \(error)")
                 }
             }
         }
@@ -409,7 +409,7 @@ final class ClipboardStore: ObservableObject {
             ioQueue.async { [weak self] in
                 guard let self else { return }
                 guard let data = try? storage.readPayload(for: item.id) else {
-                    NSLog("Clipvelope: payload missing for \(item.id)")
+                    NSLog("%@", "Clipvelope: payload missing for \(item.id)")
                     DispatchQueue.main.async {
                         self.copyText(info.plainText)
                         self.showNotice("The formatting for that entry was missing, so plain text was copied.")
@@ -440,7 +440,7 @@ final class ClipboardStore: ObservableObject {
                       data.starts(with: ClipboardMonitor.pngSignature) else {
                     // A row that looks like an image but cannot produce one is
                     // worse than no row: take it out and say why.
-                    NSLog("Clipvelope: payload missing or not a PNG for \(item.id)")
+                    NSLog("%@", "Clipvelope: payload missing or not a PNG for \(item.id)")
                     DispatchQueue.main.async {
                         self.remove(item)
                         self.showNotice("That image's file was missing, so the entry was removed.")
@@ -518,7 +518,7 @@ final class ClipboardStore: ObservableObject {
             do {
                 try task.run()
             } catch {
-                NSLog("Shell command error: \(error)")
+                NSLog("%@", "Shell command error: \(error)")
                 fail("could not start")
                 return
             }
@@ -653,7 +653,7 @@ final class ClipboardStore: ObservableObject {
             var payloads: [String: Data] = [:]
             for item in state.items where item.hasPayloadFile {
                 guard let data = try? storage.readPayload(for: item.id) else {
-                    NSLog("Clipvelope: payload missing for \(item.id), excluded from backup")
+                    NSLog("%@", "Clipvelope: payload missing for \(item.id), excluded from backup")
                     continue
                 }
                 payloads[item.id.uuidString] = data
@@ -669,7 +669,7 @@ final class ClipboardStore: ObservableObject {
             try sealed.write(to: url, options: [.atomic])
             DispatchQueue.main.async { self.backupFailure = nil }
         } catch {
-            NSLog("Export error: \(error)")
+            NSLog("%@", "Export error: \(error)")
             DispatchQueue.main.async {
                 self.backupFailure = "Could not write that backup. (\(error.localizedDescription))"
             }
@@ -731,6 +731,25 @@ final class ClipboardStore: ObservableObject {
         state.openHotkey = openHotkey
         state.preferencesHotkey = preferencesHotkey
 
+        // Where and whether this Mac writes its own backups is the user's
+        // choice, not a setting a file gets to carry. A backup asking for
+        // auto-backup would start mirroring the whole vault into ~/Documents
+        // after every copy; one that merely omits the fields decodes them as
+        // off, which would silently retire a backup the user relies on.
+        state.autoBackupEnabled = autoBackupEnabled
+        state.autoBackupMode = autoBackupMode
+
+        // A file row holds a path, and pasting it hands the target that file.
+        // The paths in someone else's backup describe their machine, so at
+        // best they are dead and at worst they name something worth stealing
+        // on this one -- ~/.ssh/id_rsa under a row labelled like a report.
+        let fileItems = state.items.filter { if case .files = $0.content { return true } else { return false } }
+        if !fileItems.isEmpty {
+            state.items.removeAll { if case .files = $0.content { return true } else { return false } }
+            notes.append("\(fileItems.count) file reference\(fileItems.count == 1 ? " was" : "s were") "
+                         + "left out: they point at files on the machine that wrote the backup.")
+        }
+
         return (state, notes)
     }
 
@@ -776,7 +795,7 @@ final class ClipboardStore: ObservableObject {
                 self.persist()
             }
         } catch {
-            NSLog("Import error: \(error)")
+            NSLog("%@", "Import error: \(error)")
             DispatchQueue.main.async {
                 self.backupFailure = "Could not read that backup. If it was exported with a "
                     + "password, check the password. (\(error.localizedDescription))"

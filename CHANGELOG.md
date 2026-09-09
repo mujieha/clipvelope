@@ -25,6 +25,10 @@ First release.
 - `Clipvelope --open` and `--preferences` act only on requests carrying a token
   held in the app's own Keychain item, so no other process can pop the history
   open.
+- Importing a portable backup leaves this Mac's own choices alone: it cannot
+  switch automatic backups on or off, change their mode, rebind shortcuts, or
+  add file rows, which would otherwise hand a paste target any file whose path
+  the backup's author guessed.
 - Hostile input is refused before it costs anything: a backup may demand at most
   ten million key-derivation rounds, an image is checked against its declared
   pixel count before decoding, and formatted text with an oversized plain

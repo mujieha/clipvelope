@@ -176,6 +176,120 @@ final class ImportHardeningTests: XCTestCase {
         XCTAssertThrowsError(try BackupCodec.open(file, password: "pw"))
     }
 
+    // MARK: - Backup settings are this Mac's, not the file's
+
+    /// Auto backup writes the whole vault to ~/Documents, which is commonly
+    /// cloud-synced. A file the user was told cannot weaken their settings must
+    /// not be able to switch that on.
+    func testPortableBackupCannotTurnOnAutoBackup() throws {
+        let store = makeStore()
+        XCTAssertFalse(store.autoBackupEnabled, "precondition")
+
+        var state = AppState.empty
+        state.items = [ClipboardItem(text: "hello")]
+        state.autoBackupEnabled = true
+        state.autoBackupMode = .keychain
+        let url = root.appendingPathComponent("autobackup-on.cvb")
+        try writeBackup(state, to: url, password: "pw")
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertFalse(store.autoBackupEnabled,
+                       "an untrusted backup must not switch automatic backups on")
+    }
+
+    /// The inverse, which needs no hostile intent at all: AppState decodes a
+    /// missing field as off, so any ordinary backup would silently retire a
+    /// backup the user depends on.
+    func testPortableBackupCannotTurnOffOrRetargetAutoBackup() throws {
+        let store = makeStore()
+        store.autoBackupEnabled = true
+        store.autoBackupMode = .password
+        settle(store)
+
+        var state = AppState.empty
+        state.items = [ClipboardItem(text: "hello")]
+        state.autoBackupEnabled = false
+        state.autoBackupMode = .keychain
+        let url = root.appendingPathComponent("autobackup-off.cvb")
+        try writeBackup(state, to: url, password: "pw")
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertTrue(store.autoBackupEnabled, "the user's own auto-backup choice must survive an import")
+        XCTAssertEqual(store.autoBackupMode, .password, "and so must its mode")
+    }
+
+    // MARK: - File references from an untrusted backup
+
+    /// A file row hands the paste target the file itself. The paths in someone
+    /// else's backup describe their machine; on this one they are either dead
+    /// or worth stealing.
+    func testPortableBackupCannotPlantFileReferences() throws {
+        let store = makeStore()
+        var state = AppState.empty
+        state.items = [
+            ClipboardItem(id: UUID(), createdAt: Date(), isPinned: false,
+                          content: .files([.init(path: "/Users/victim/Downloads/Q3-report.pdf"),
+                                           .init(path: "/Users/victim/.ssh/id_rsa")]),
+                          sourceBundleID: nil),
+            ClipboardItem(text: "an ordinary snippet"),
+        ]
+        let url = root.appendingPathComponent("files.cvb")
+        try writeBackup(state, to: url, password: "pw")
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertEqual(store.items.map(\.searchText), ["an ordinary snippet"],
+                       "file references from an untrusted backup must not become history rows")
+        XCTAssertTrue(store.importNotice?.contains("file reference") ?? false,
+                      "and the user must be told, got: \(store.importNotice ?? "nil")")
+    }
+
+    /// A backup this Mac's own key sealed is the user's own data, so its file
+    /// rows are kept.
+    func testDeviceBoundBackupKeepsFileReferences() throws {
+        let store = makeStore()
+        var state = AppState.empty
+        state.items = [ClipboardItem(id: UUID(), createdAt: Date(), isPinned: false,
+                                     content: .files([.init(path: "/Users/me/notes.txt")]),
+                                     sourceBundleID: nil)]
+        let url = root.appendingPathComponent("mine.cvb")
+        try writeBackup(state, to: url, password: nil)
+
+        store.importBackup(from: url, password: nil)
+        settle(store)
+
+        XCTAssertEqual(store.items.count, 1)
+    }
+
+    // MARK: - A vault payload is not a backup
+
+    /// Importing a portable backup seals its payloads under the vault key. If a
+    /// headerless file still counted as a device-bound backup, the user could be
+    /// talked into importing one of those payload files, and it would be applied
+    /// with full trust: shell Quick Slots armed, privacy settings obeyed.
+    func testAVaultPayloadFileCannotBeImportedAsADeviceBoundBackup() throws {
+        let store = makeStore()
+        let planted = try JSONEncoder().encode(VaultSnapshot(state: hostileState(), payloads: [:]))
+        let id = UUID()
+
+        // Exactly what the import path would write: the attacker's bytes, sealed
+        // with this Mac's vault key.
+        let storage = EncryptedStorage(directory: root.appendingPathComponent("vault"),
+                                       keyStore: FixedKeyStore(seed: 1))
+        try storage.writePayload(planted, for: id)
+
+        store.importBackup(from: storage.payloadURL(for: id), password: nil)
+        settle(store)
+
+        XCTAssertTrue(store.bindings.isEmpty, "a payload file must not import as a trusted backup")
+        XCTAssertNotNil(store.backupFailure, "and the attempt must be reported")
+    }
+
     // MARK: - Duplicate ids
 
     /// The panel indexes rows by id with an initializer that traps on a
