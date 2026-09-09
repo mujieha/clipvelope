@@ -62,6 +62,9 @@ final class ClipboardStore: ObservableObject {
     /// A ceiling on what one untrusted backup may install, well above any vault
     /// this app produces and far below a file built to fill a disk.
     static let maxImportedItems = 1_000
+    /// And a ceiling on the total inline text it may install, because every byte
+    /// of it is re-encrypted on every copy for as long as it stays in the vault.
+    static let maxImportedInlineBytes = 32 * 1024 * 1024
     /// Ceiling on stored image bytes. A count-based cap alone would happily
     /// hold 200 screenshots.
     private let maxPayloadBytes = 512 * 1024 * 1024
@@ -302,7 +305,7 @@ final class ClipboardStore: ObservableObject {
         apply(.empty)
         ioQueue.async { [weak self] in
             guard let self else { return }
-            storage.quarantineUnreadableIndex()
+            storage.quarantineUnreadableVault()
             DispatchQueue.main.async {
                 self.writesSuspended = false
                 self.storageFailure = nil
@@ -767,40 +770,51 @@ final class ClipboardStore: ObservableObject {
         // The paths in someone else's backup describe their machine, so at
         // best they are dead and at worst they name something worth stealing
         // on this one -- ~/.ssh/id_rsa under a row labelled like a report.
-        // Pinned rows are exempt from the history cap by design, so a backup of
-        // nothing but pinned rows would grow the vault forever; and inline text
-        // is re-encrypted on every copy, which is why capture caps it. A file
-        // gets neither exemption.
-        let overlongText = state.items.filter { $0.searchText.utf8.count > ClipboardMonitor.maxTextBytes }
-        if !overlongText.isEmpty {
-            let ids = Set(overlongText.map(\.id))
-            state.items.removeAll { ids.contains($0.id) }
-            notes.append("\(ids.count) oversized entr\(ids.count == 1 ? "y was" : "ies were") left out.")
-        }
-        // Quick Slots and folder commands live inline in the index exactly as
-        // item text does, are re-encrypted on every single copy, and no policy
-        // ever trims them -- so an oversized one taxes every copy forever.
-        let longCommand = { (text: String) in text.utf8.count > ClipboardMonitor.maxTextBytes }
-        let fatBindings = state.bindings.filter { longCommand($0.content) || longCommand($0.title) }
-        if !fatBindings.isEmpty {
-            let ids = Set(fatBindings.map(\.id))
-            state.bindings.removeAll { ids.contains($0.id) }
-        }
-        for folder in state.folders.indices {
-            state.folders[folder].items.removeAll { longCommand($0.content) || longCommand($0.title) }
-        }
-        state.bindings = Array(state.bindings.prefix(Self.maxImportedItems))
-        state.folders = Array(state.folders.prefix(Self.maxImportedItems))
-        for folder in state.folders.indices {
-            state.folders[folder].items =
-                Array(state.folders[folder].items.prefix(Self.maxImportedItems))
+        // Everything below is one budget rather than a set of separate caps,
+        // because a per-entry limit does not bound a total: a thousand entries
+        // each just under it is still gigabytes. All of this text lives inline
+        // in the index, which is re-encrypted and rewritten on every single
+        // copy, and no policy ever trims it -- so whatever an import installs
+        // here is a tax on every copy the user makes from now on. Pinned rows
+        // are exempt from the history cap by design, which is exactly why a
+        // file may not choose how many there are.
+        var remaining = Self.maxImportedInlineBytes
+        func affordable(_ text: String) -> Bool {
+            let cost = text.utf8.count
+            guard cost <= ClipboardMonitor.maxTextBytes, cost <= remaining else { return false }
+            remaining -= cost
+            return true
         }
 
-        if state.items.count > Self.maxImportedItems {
-            let dropped = state.items.count - Self.maxImportedItems
-            state.items = Array(state.items.prefix(Self.maxImportedItems))
-            notes.append("The backup held more than \(Self.maxImportedItems) entries; "
-                         + "the oldest \(dropped) were left out.")
+        let itemsBefore = state.items.count
+        state.items = Array(state.items.prefix(Self.maxImportedItems))
+            .filter { affordable($0.searchText) }
+        if state.items.count < itemsBefore {
+            let dropped = itemsBefore - state.items.count
+            notes.append("\(dropped) entr\(dropped == 1 ? "y was" : "ies were") left out for "
+                         + "being oversized, or beyond the \(Self.maxImportedItems) an import "
+                         + "may bring.")
+        }
+
+        let bindingsBefore = state.bindings.count
+        state.bindings = Array(state.bindings.prefix(Self.maxImportedItems))
+            .filter { affordable($0.title + $0.content) }
+        let foldersBefore = state.folders.reduce(state.folders.count) { $0 + $1.items.count }
+        state.folders = Array(state.folders.prefix(Self.maxImportedItems))
+            .filter { affordable($0.name) }
+            .map { folder in
+                var folder = folder
+                folder.items = Array(folder.items.prefix(Self.maxImportedItems))
+                    .filter { affordable($0.title + $0.content) }
+                return folder
+            }
+        let foldersAfter = state.folders.reduce(state.folders.count) { $0 + $1.items.count }
+        let commandsDropped = (bindingsBefore - state.bindings.count) + (foldersBefore - foldersAfter)
+        if commandsDropped > 0 {
+            // Losing a Quick Slot without being told is indistinguishable from
+            // the feature quietly breaking.
+            notes.append("\(commandsDropped) Quick Slot\(commandsDropped == 1 ? " or folder command was" : "s or folder commands were") "
+                         + "left out for the same reason.")
         }
 
         let fileItems = state.items.filter { if case .files = $0.content { return true } else { return false } }
@@ -899,7 +913,7 @@ final class ClipboardStore: ObservableObject {
                     // The unreadable index is ciphertext that may still decrypt once
                     // the right key is back. A successful import replaces the vault,
                     // but it must not write over that file.
-                    self.storage.quarantineUnreadableIndex()
+                    self.storage.quarantineUnreadableVault()
                 }
                 self.apply(state)
                 // A successful import is authoritative: it clears a suspended vault.

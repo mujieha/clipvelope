@@ -25,6 +25,10 @@ First release.
 - `Clipvelope --open` and `--preferences` act only on requests carrying a token
   held in the app's own Keychain item, so no other process can pop the history
   open.
+- Starting fresh from an unreadable vault now keeps the stored images and
+  formatted text alongside the index, instead of keeping only the index and
+  letting the next launch delete every attachment. The app said the vault was
+  kept for recovery; now it is.
 - Importing a portable backup leaves this Mac's own choices alone: it cannot
   switch automatic backups on or off, change their mode, rebind shortcuts, or
   add file rows, which would otherwise hand a paste target any file whose path

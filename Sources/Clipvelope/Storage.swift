@@ -124,10 +124,15 @@ final class EncryptedStorage {
         return state
     }
 
-    /// Moves an unreadable index aside rather than deleting it, so a user whose
+    /// Moves an unreadable vault aside rather than deleting it, so a user whose
     /// Keychain was merely locked can still recover the ciphertext later.
+    ///
+    /// The payload files go with it. The index holds metadata and inline text
+    /// and not one byte of any image or formatted-text entry, so leaving
+    /// `items/` behind means the next launch's orphan sweep deletes every one of
+    /// them -- moments after the app promised the vault had been kept.
     @discardableResult
-    func quarantineUnreadableIndex() -> URL? {
+    func quarantineUnreadableVault() -> URL? {
         let source = FileManager.default.fileExists(atPath: indexURL.path) ? indexURL : legacyBlobURL
         guard FileManager.default.fileExists(atPath: source.path) else { return nil }
 
@@ -135,11 +140,19 @@ final class EncryptedStorage {
         let dest = directory.appendingPathComponent("\(source.lastPathComponent).unreadable-\(stamp)")
         do {
             try FileManager.default.moveItem(at: source, to: dest)
-            return dest
         } catch {
             NSLog("%@", "Clipvelope quarantine error: \(error)")
             return nil
         }
+        if FileManager.default.fileExists(atPath: payloadsDirectory.path) {
+            let payloads = directory.appendingPathComponent("items.unreadable-\(stamp)")
+            do {
+                try FileManager.default.moveItem(at: payloadsDirectory, to: payloads)
+            } catch {
+                NSLog("%@", "Clipvelope: kept the index but could not move its payloads aside: \(error)")
+            }
+        }
+        return dest
     }
 
     // MARK: - Payloads

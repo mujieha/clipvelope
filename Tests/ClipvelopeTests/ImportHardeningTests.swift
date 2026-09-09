@@ -388,6 +388,46 @@ final class ImportHardeningTests: XCTestCase {
         XCTAssertEqual(store.bindings.map(\.title), ["first"])
     }
 
+    /// Losing a Quick Slot silently is indistinguishable from the feature
+    /// breaking, which is the rule this codebase sets for itself.
+    func testAnImportSaysWhenItLeavesQuickSlotsOut() throws {
+        let store = makeStore()
+        var state = AppState.empty
+        state.items = [ClipboardItem(text: "x")]
+        state.bindings = [ClipboardBinding(
+            id: UUID(), title: "huge",
+            content: String(repeating: "x", count: ClipboardMonitor.maxTextBytes + 1),
+            isShell: false)]
+        let url = root.appendingPathComponent("fat-binding.cvb")
+        try writeBackup(state, to: url, password: "pw")
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertTrue(store.bindings.isEmpty)
+        XCTAssertTrue(store.importNotice?.contains("Quick Slot") ?? false,
+                      "got: \(store.importNotice ?? "nil")")
+    }
+
+    /// A per-entry cap does not bound a total. Many entries each just under the
+    /// limit still tax every future copy, because all of it is re-encrypted on
+    /// each one.
+    func testTheTotalInlineTextAnImportMayInstallIsBounded() throws {
+        let store = makeStore()
+        var state = AppState.empty
+        let oneMB = String(repeating: "x", count: 1024 * 1024)
+        state.items = (0..<200).map { _ in ClipboardItem(text: oneMB) }
+        let url = root.appendingPathComponent("aggregate.cvb")
+        try writeBackup(state, to: url, password: "pw")
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        let total = store.items.reduce(0) { $0 + $1.searchText.utf8.count }
+        XCTAssertLessThanOrEqual(total, ClipboardStore.maxImportedInlineBytes)
+        XCTAssertGreaterThan(store.items.count, 0, "but a reasonable prefix still imports")
+    }
+
     // MARK: - The retired backup format
 
     /// Pre-release builds wrote headerless files. They are refused now, and the

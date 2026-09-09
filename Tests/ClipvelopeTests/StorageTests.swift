@@ -286,7 +286,7 @@ final class StorageTests: XCTestCase {
         try storage.saveIndex( sampleState())
         let original = try Data(contentsOf: storage.indexURL)
 
-        let moved = try XCTUnwrap(storage.quarantineUnreadableIndex())
+        let moved = try XCTUnwrap(storage.quarantineUnreadableVault())
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: storage.indexURL.path))
         XCTAssertEqual(try Data(contentsOf: moved), original,
@@ -294,6 +294,29 @@ final class StorageTests: XCTestCase {
     }
 
     func testQuarantineWithNoFileIsANoOp() {
-        XCTAssertNil(makeStorage().quarantineUnreadableIndex())
+        XCTAssertNil(makeStorage().quarantineUnreadableVault())
+
+    }
+
+    /// "Start Fresh" tells the user the vault is kept so it can be recovered.
+    /// The index holds no image bytes, so keeping only the index and leaving
+    /// `items/` for the next launch's orphan sweep would make that untrue.
+    func testQuarantineTakesThePayloadsWithTheIndex() throws {
+        let storage = makeStorage()
+        let id = UUID()
+        try storage.saveIndex(sampleState())
+        try storage.writePayload(Data("an image".utf8), for: id)
+
+        _ = storage.quarantineUnreadableVault()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: storage.payloadsDirectory.path),
+                       "the live payload directory must have been moved aside")
+        let kept = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.hasPrefix("items.unreadable-") }
+        XCTAssertEqual(kept.count, 1, "and kept, not deleted")
+        let recovered = dir.appendingPathComponent(kept[0])
+            .appendingPathComponent("\(id.uuidString).cvi")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recovered.path),
+                      "with the payload still inside it")
     }
 }
