@@ -3,9 +3,9 @@
 Local‑only macOS clipboard manager with encrypted storage.
 
 <p align="center">
-  <img src="docs/images/panel.png" width="380" alt="The history panel: recent items grouped by time, with keyboard shortcuts">
+  <img src="docs/images/panel.png" height="440" alt="The history panel: recent items grouped by time, with keyboard shortcuts">
   &nbsp;&nbsp;
-  <img src="docs/images/preferences.png" width="420" alt="Preferences: theme, launch at login, and the keyboard shortcuts">
+  <img src="docs/images/preferences.png" height="440" alt="Preferences: theme, launch at login, and the keyboard shortcuts">
 </p>
 
 ## Security / Privacy
