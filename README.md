@@ -2,12 +2,22 @@
 
 Local‑only macOS clipboard manager with encrypted storage.
 
+<p align="center">
+  <img src="docs/images/panel.png" height="440" alt="The history panel: recent items grouped by time, with keyboard shortcuts">
+  &nbsp;&nbsp;
+  <img src="docs/images/preferences.png" height="440" alt="Preferences: theme, launch at login, and the keyboard shortcuts">
+</p>
+
 ## Security / Privacy
-- **Local only**: your clipboard never leaves the machine. No telemetry, no account, no sync.
+- **Local only**: Clipvelope sends your clipboard nowhere. No telemetry, no account, no sync.
+  The one thing that can put a copy outside this Mac is a feature you turn on yourself: auto backup
+  writes to `~/Documents`, which iCloud copies to your account if you use Desktop & Documents sync.
+  That file is encrypted and its key stays in the local Keychain, so what would sync is ciphertext.
   A release build contacts exactly one URL — the update feed, once a day, to ask whether a newer
   version exists — and sends nothing about you or what you copied. A build without the updater
-  (`make app`, and what CI produces) makes no network calls at all. `Clipvelope --status` says
-  which one you are running and whether that feed is actually reachable.
+  (`make app`, and what CI produces) makes no network calls at all, not even from `--status`.
+  `Clipvelope --status` says which build you are running and, in a release build, whether
+  that feed is actually reachable.
 - **Encryption at rest**: everything is stored under `~/Library/Application Support/Clipvelope/` encrypted with **AES‑GCM** — the index and each image payload separately.
 - **Key storage**: the encryption key is stored in the macOS **Keychain** under service `com.mujieha.Clipvelope`.
   A signed build puts it in the *data protection* keychain, where it is private to Clipvelope. An **ad-hoc build
@@ -16,9 +26,18 @@ Local‑only macOS clipboard manager with encrypted storage.
 - **Fail‑safe**: if the vault cannot be decrypted (locked Keychain, denied access, corruption), Clipvelope **stops writing** and tells you, rather than silently starting from empty and overwriting your history.
 - **Skips passwords by default**: content marked concealed by password managers (the `org.nspasteboard.*` convention) is not recorded. You can also ignore specific apps, or pause capture entirely.
 
+## Install
+1. Download `Clipvelope-<version>.dmg` from the [latest release](https://github.com/mujieha/clipvelope/releases/latest).
+2. Open it and drag Clipvelope to Applications.
+3. Launch it. It appears in the menu bar, not the Dock. Press **Control + Option + V**
+   or click the icon.
+
+Releases are signed with a Developer ID and notarized by Apple, so macOS opens
+them without a warning. Updates arrive through the app itself.
+
 ## Requirements
 - macOS 26 (Tahoe)
-- Xcode 26+ (for building/running)
+- Xcode 26+, only to build from source
 
 ## Build & Run (Xcode)
 1. Clone the repo:
@@ -50,6 +69,9 @@ The app appears in the menu bar as **Clipvelope**.
 - "Clear" asks for confirmation, then deletes the encrypted vault and any auto-backup file.
 - `Clipvelope --open` opens the history and `Clipvelope --preferences` opens Preferences, from a
   script or a launcher such as Raycast, Alfred or Karabiner, without needing Accessibility access.
+  A request has to carry a token the running app keeps in its Keychain item, so merely posting the
+  notification does nothing. That is convenience hardening, not a security boundary: anything running
+  as you can run Clipvelope's own binary. See [SECURITY.md](SECURITY.md).
   **Command + ,** opens Preferences while the history is open; that one is changeable too.
 
 ## Preferences
@@ -84,11 +106,16 @@ All in **Preferences → Backup**.
 - **Portable** — Export… / Import… with a password you choose, stretched with
   **PBKDF2‑HMAC‑SHA256** (600,000 iterations, random 16‑byte salt). Restorable on any Mac.
   Because a portable backup can come from anyone, importing one **disables the Shell flag** on every
-  Quick Slot and folder command it contains, and can never weaken your privacy settings. The text is
+  Quick Slot and folder command it contains, and can never weaken your privacy settings, change your
+  auto-backup choice, rebind your shortcuts, or add file references. The text is
   kept so you can read it and re-enable Shell yourself for anything you recognise. A keychain backup
   can only have been written by this Mac, so it restores unchanged.
-- **Auto backup**: writes `~/Documents/Clipvelope/clipvelope-backup.cvb` on every change, protected
-  by either the Keychain key or your backup password.
+- **Auto backup** (off unless you turn it on): writes `~/Documents/Clipvelope/clipvelope-backup.cvb`
+  on every change, protected by either the Keychain key or your backup password. Note that
+  `~/Documents` is one of the folders iCloud syncs when Desktop & Documents sync is on, so this is
+  the one setting that can copy your (encrypted) history off this Mac. In Password mode nothing is written until a
+  password has been saved; the Backup tab says so rather than silently writing a device-bound file.
+- Every import asks for confirmation first, because it replaces the whole vault, pinned items included.
 
 Backup files start with a `CVB1` header recording the mode and key‑derivation parameters, so the
 format can change without stranding old files. Backups written by earlier versions still import.
@@ -127,7 +154,7 @@ original is moved aside, not deleted.
   preserves it, while pasting into a plain field still gives sensible text. Anything over 8 MB is kept as plain text.
 - Each entry remembers **which app it was copied from** and shows that app's icon in the list.
 - History is capped to the most recent 200 items and 512 MB of image payloads; pinned items are exempt from both.
-- Images larger than 32 MB are skipped rather than stored.
+- Images larger than 32 MB and plain text larger than 2 MB are skipped rather than stored.
 - This app intentionally does **not** sync or upload anything.
 
 ## Development
@@ -136,15 +163,17 @@ make build    # swift build
 make test     # runs the test suite (points DEVELOPER_DIR at Xcode for XCTest)
 make app      # assembles dist/Clipvelope.app
 make run      # build the bundle and launch it
-make icon     # regenerates Resources/AppIcon.icns
+make icon     # regenerates the menu bar template and the social preview
 make smoke    # launches the built app and checks the panel and Preferences open
 ```
 
-The icon is drawn in code (`scripts/make-icon.swift`) rather than checked in as
-artwork, so it can be adjusted and regenerated. It is a padlock and a clipboard
-drawn as one object: the board is the lock body, the clip is the shackle, and the
-lines of copied text sit where the keyhole would be. `Resources/AppIcon.icns` is
-committed, so you only need `make icon` if you change the drawing.
+The app icon is an Icon Composer document, `Resources/Clipvelope.icon`: a sealed
+envelope with a padlock stamped in its copper seal, as vector layers. `make app`
+compiles it with Apple's `actool` into the layered `Assets.car` that macOS 26
+draws with Liquid Glass, and renders the classic `.icns` from the system's own
+drawing of it at every size. Open the document in Icon Composer to change it.
+The menu bar icon is the same envelope as an 18-point vector template,
+`Resources/MenuBarIcon.pdf`, regenerated by `make icon`.
 
 `swift build` alone produces a bare executable, which cannot be a menu-bar app:
 `LSUIElement` and Launch at Login both require a real bundle. Use `make app`.
@@ -166,5 +195,15 @@ To ship it to other people — a signed, notarized DMG that opens without warnin
 and updates itself — see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 
+## Support and security
+Questions and bugs: [GitHub Issues](https://github.com/mujieha/clipvelope/issues).
+Vulnerabilities: see [SECURITY.md](SECURITY.md); please report privately.
+Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Acknowledgements
+Release builds embed [Sparkle](https://sparkle-project.org) for updates, under the
+MIT license; its notice is in [docs/THIRD-PARTY-LICENSES.md](docs/THIRD-PARTY-LICENSES.md)
+and inside the app under Preferences → General → Acknowledgements.
+
 ## License
-MIT
+MIT. See [LICENSE](LICENSE).

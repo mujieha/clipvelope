@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, develop]
+    branches: [main, develop]
   pull_request:
   workflow_dispatch:
 
@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Toolchain
         run: |
@@ -31,7 +31,7 @@ jobs:
           echo "developer dir: $(xcode-select -p)"
 
       - name: Cache SwiftPM build
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .build
           key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
@@ -129,10 +129,17 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "com.mujieha.Clipvelope"
 
-          # The icon is named in Info.plist and copied by bundle.sh; a mismatch
-          # between the two shows up as a blank generic icon and nothing else.
+          # The icon is compiled from Resources/Clipvelope.icon by bundle.sh. A
+          # mismatch between Info.plist and the files shows up as a blank generic
+          # icon and nothing else, and an .icns without its 1024 px size shows
+          # up as a blurry one.
           icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist")
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$plist")" = "$icon"
           test -f "$APP/Contents/Resources/$icon.icns"
+          test -f "$APP/Contents/Resources/Assets.car"
+          test -f "$APP/Contents/Resources/MenuBarIcon.pdf"
+          iconutil -c iconset "$APP/Contents/Resources/$icon.icns" -o /tmp/verify.iconset
+          test -f /tmp/verify.iconset/icon_512x512@2x.png
           echo "bundle looks correct"
 
       # Catches the app failing before it ever draws anything -- a broken entry
@@ -157,8 +164,11 @@ jobs:
       - name: Build and verify the disk image
         run: SKIP_BUILD=yes ./scripts/make-dmg.sh
 
+      # Not for pull requests: a fork's code would otherwise be published as a
+      # download attributed to this repository.
       - name: Upload app bundle
-        uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: Clipvelope-app
           path: dist/Clipvelope.app

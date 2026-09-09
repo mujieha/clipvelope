@@ -18,7 +18,7 @@ enum LoginItemController {
             }
             return nil
         } catch {
-            NSLog("Login item error: \(error)")
+            NSLog("%@", "Login item error: \(error)")
             return error
         }
     }

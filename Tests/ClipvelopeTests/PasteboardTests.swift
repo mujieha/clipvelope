@@ -68,11 +68,62 @@ final class CaptureReadingTests: XCTestCase {
         XCTAssertEqual(plain, "x")
     }
 
+    func testOversizedPlainTextIsNotCaptured() {
+        pb.setString(String(repeating: "a", count: ClipboardMonitor.maxTextBytes + 1), forType: .string)
+        XCTAssertNil(ClipboardMonitor.readPayload(from: pb))
+        pb.clearContents()
+        pb.setString(String(repeating: "a", count: ClipboardMonitor.maxTextBytes), forType: .string)
+        XCTAssertNotNil(ClipboardMonitor.readPayload(from: pb))
+    }
+
     func testOversizedRichTextFallsBackToPlainText() {
         pb.setData(Data(count: ClipboardMonitor.maxRichTextBytes + 1), forType: .rtf)
         pb.setString("plain", forType: .string)
         guard case .text(let s)? = ClipboardMonitor.readPayload(from: pb) else { return XCTFail() }
         XCTAssertEqual(s, "plain")
+    }
+
+    /// The plain rendering of a rich paste lives inline in the index, like plain
+    /// text does, so it gets the same cap; otherwise a small RTF could carry an
+    /// unbounded string past the plain-text limit.
+    func testRichTextWithAnOversizedPlainRenderingIsSkipped() {
+        let huge = String(repeating: "x", count: ClipboardMonitor.maxTextBytes + 1)
+        pb.setString(huge, forType: .string)
+        pb.setData(Data("{\\rtf1 small}".utf8), forType: .rtf)
+        XCTAssertNil(ClipboardMonitor.readPayload(from: pb))
+    }
+
+    /// A valid PNG well under a megabyte that declares 81 million pixels. Decoding it
+    /// would allocate the whole raster, so the declared size is checked first,
+    /// on both the PNG and the TIFF path (ImageIO sniffs the real format).
+    func testAnImageDeclaringMorePixelsThanTheCeilingIsSkippedWithoutDecoding() {
+        let hostile = compressiblePNG(width: 9000, height: 9000)
+        XCTAssertLessThan(hostile.count, 1_000_000, "the point is that the file is small")
+        XCTAssertEqual(ClipboardMonitor.declaredPixelSize(of: hostile).map { [$0.0, $0.1] },
+                       [9000, 9000], "the fixture must be a readable PNG")
+        XCTAssertGreaterThan(9000 * 9000, ClipboardMonitor.maxImagePixels)
+
+        pb.setData(hostile, forType: .png)
+        XCTAssertNil(ClipboardMonitor.readPayload(from: pb))
+
+        pb.clearContents()
+        pb.setData(hostile, forType: .tiff)
+        XCTAssertNil(ClipboardMonitor.readPayload(from: pb))
+    }
+
+    /// The same construction at a sane size still captures, so the ceiling is
+    /// the only thing the previous test exercises.
+    func testACompressibleImageUnderTheCeilingIsCaptured() {
+        pb.setData(compressiblePNG(width: 300, height: 200), forType: .png)
+        guard case .image(_, _, let w, let h)? = ClipboardMonitor.readPayload(from: pb) else { return XCTFail() }
+        XCTAssertEqual([w, h], [300, 200])
+    }
+
+    func testTheImageCeilingAdmitsScreensAndRefusesTheAbsurd() {
+        XCTAssertTrue(ClipboardMonitor.acceptsImage(pixelWidth: 6016, pixelHeight: 3384), "a 6K display")
+        XCTAssertFalse(ClipboardMonitor.acceptsImage(pixelWidth: 50_000, pixelHeight: 50_000))
+        XCTAssertFalse(ClipboardMonitor.acceptsImage(pixelWidth: 0, pixelHeight: 10))
+        XCTAssertFalse(ClipboardMonitor.acceptsImage(pixelWidth: .max, pixelHeight: 2), "overflow")
     }
 
     func testPNGIsAnImageWithItsDimensions() {
@@ -199,6 +250,32 @@ final class StoreCopyingTests: XCTestCase {
 
         let reopened = makeStore()
         XCTAssertEqual(reopened.items.map(\.searchText), ["keep me"], "and it stays gone")
+    }
+
+    /// The shell runs on a global queue; wait for either outcome.
+    private func waitForShell(_ store: ClipboardStore, until done: () -> Bool) {
+        for _ in 0..<150 where !done() {
+            store.drainPendingWork()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
+    func testAQuickSlotCommandCopiesItsOutput() {
+        let store = makeStore()
+        store.runShellAndCopy("printf 'from the shell'")
+        waitForShell(store) { pb.string(forType: .string) != nil }
+        XCTAssertEqual(pb.string(forType: .string), "from the shell")
+        XCTAssertNil(store.notice)
+    }
+
+    func testAFailingQuickSlotCommandLeavesTheClipboardAloneAndSaysSo() {
+        let store = makeStore()
+        pb.setString("keep me", forType: .string)
+        store.runShellAndCopy("echo lost >/dev/null; exit 3")
+        waitForShell(store) { store.notice != nil }
+        XCTAssertEqual(pb.string(forType: .string), "keep me",
+                       "a failed command used to clear the clipboard and paste nothing")
+        XCTAssertEqual(store.notice?.contains("exit 3"), true)
     }
 
     func testCopyingFilesPutsTheirURLsBack() throws {

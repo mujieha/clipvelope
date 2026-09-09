@@ -23,10 +23,12 @@ smoke: app
 xcodeproj:
 	python3 scripts/make-xcodeproj.py $(TEAM)
 
-icon:
-	swift scripts/make-icon.swift AppIcon.iconset
-	iconutil -c icns AppIcon.iconset -o Resources/AppIcon.icns
-	rm -rf AppIcon.iconset
+# The app icon is compiled from Resources/Clipvelope.icon on every `make app`.
+# This regenerates the two derived assets: the menu bar template and the
+# GitHub social preview, rendered from the built app's icon.
+icon: app
+	swift scripts/make-menubar-icon.swift Resources/MenuBarIcon.pdf
+	swift scripts/render-app-icon.swift dist/Clipvelope.app dist/Clipvelope.icns docs/images/social-preview.png
 
 dmg:
 	./scripts/make-dmg.sh

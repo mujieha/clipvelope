@@ -7,8 +7,6 @@ import Combine
 #if SPARKLE
 import Sparkle
 
-import Sparkle
-
 /// Wraps Sparkle so nothing else in the app imports it.
 ///
 /// The awkward part is that Clipvelope is an LSUIElement app. Sparkle wants to

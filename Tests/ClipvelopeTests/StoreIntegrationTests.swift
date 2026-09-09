@@ -229,8 +229,25 @@ final class StoreIntegrationTests: XCTestCase {
 
         XCTAssertEqual(destination.items.map(\.searchText), ["existing entry"],
                        "a failed import must not wipe what was already there")
-        XCTAssertNotNil(destination.storageFailure,
+        XCTAssertNotNil(destination.backupFailure,
                         "a failed import must say so rather than fail silently")
+        XCTAssertNil(destination.storageFailure,
+                     "and it must not look like the vault itself is broken")
+        XCTAssertFalse(destination.writesSuspended)
+    }
+
+    func testStartFreshIsRefusedWhileTheVaultIsReadable() {
+        let store = makeStore()
+        store.add(text: "precious")
+        settle(store)
+
+        store.discardUnreadableVault()
+        store.retryLoadingVault()
+        settle(store)
+
+        XCTAssertEqual(store.items.map(\.searchText), ["precious"])
+        XCTAssertEqual(makeStore().items.map(\.searchText), ["precious"],
+                       "nothing was quarantined or rewritten on disk")
     }
 
     func testAKeychainBackupCannotBeOpenedOnAnotherMachine() {
@@ -248,7 +265,7 @@ final class StoreIntegrationTests: XCTestCase {
         settle(elsewhere)
 
         XCTAssertTrue(elsewhere.items.isEmpty)
-        XCTAssertNotNil(elsewhere.storageFailure)
+        XCTAssertNotNil(elsewhere.backupFailure)
     }
 
     // MARK: - Privacy tab

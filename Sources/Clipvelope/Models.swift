@@ -1,9 +1,5 @@
 import Foundation
 
-extension Notification.Name {
-    static let clipvelopeOpen = Notification.Name("clipvelope.open")
-}
-
 // MARK: - Models
 
 /// What a history entry holds.
@@ -25,18 +21,62 @@ enum ClipboardContent: Codable, Equatable {
     /// and the row label all need it without touching the disk. The RTF or HTML
     /// bytes live in the item's payload file, exactly like an image.
     struct RichTextInfo: Codable, Equatable {
+        /// Formatted text above this is kept as plain text instead. RTF with
+        /// embedded images can be enormous for what looks like a short paste.
+        static let maxBytes = 8 * 1024 * 1024
+
         var plainText: String
         var byteCount: Int
         /// UTI of the stored payload: "public.rtf" or "public.html".
         var typeIdentifier: String
+
+        init(plainText: String, byteCount: Int, typeIdentifier: String) {
+            self.plainText = plainText
+            self.byteCount = byteCount
+            self.typeIdentifier = typeIdentifier
+        }
+
+        // Decoded with the count clamped: this can arrive in a portable backup
+        // from anyone, and an absurd value overflows the byte-budget arithmetic
+        // or evicts the entire history on the next copy.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            plainText = try c.decode(String.self, forKey: .plainText)
+            byteCount = min(max(0, try c.decode(Int.self, forKey: .byteCount)), Self.maxBytes)
+            typeIdentifier = try c.decode(String.self, forKey: .typeIdentifier)
+        }
     }
 
     struct ImageInfo: Codable, Equatable {
+        /// Images larger than this are skipped rather than stored. Even with
+        /// per-item files, an unbounded payload is a way to fill someone's disk.
+        static let maxBytes = 32 * 1024 * 1024
+        /// Decoded pixels, checked against the *declared* size before anything
+        /// is decoded. A sub-megabyte compressed file can declare 50000x50000
+        /// and the decoder would allocate the 10 GB raster on its word. 64 MP is
+        /// three times a 6K display.
+        static let maxPixels = 64_000_000
+
         var pixelWidth: Int
         var pixelHeight: Int
         var byteCount: Int
         /// UTI of the stored payload, e.g. "public.png".
         var typeIdentifier: String
+
+        init(pixelWidth: Int, pixelHeight: Int, byteCount: Int, typeIdentifier: String) {
+            self.pixelWidth = pixelWidth
+            self.pixelHeight = pixelHeight
+            self.byteCount = byteCount
+            self.typeIdentifier = typeIdentifier
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            pixelWidth = max(0, try c.decode(Int.self, forKey: .pixelWidth))
+            pixelHeight = max(0, try c.decode(Int.self, forKey: .pixelHeight))
+            byteCount = min(max(0, try c.decode(Int.self, forKey: .byteCount)), Self.maxBytes)
+            typeIdentifier = try c.decode(String.self, forKey: .typeIdentifier)
+        }
     }
 
     struct FileRef: Codable, Equatable {
@@ -92,6 +132,17 @@ struct ClipboardItem: Codable, Identifiable, Equatable {
     }
 
     var hasPayloadFile: Bool { payloadByteCount > 0 }
+}
+
+extension Array where Element: Identifiable {
+    /// Keeps the first element with each id. Views index rows by id, and the
+    /// ids come out of a file, so they are unique only if something makes them
+    /// so: `ForEach` renders undefined output on a repeat, and the row map in
+    /// the history panel used to trap outright.
+    func removingDuplicateIDs() -> [Element] {
+        var seen = Set<Element.ID>()
+        return filter { seen.insert($0.id).inserted }
+    }
 }
 
 extension ClipboardItem {

@@ -1,8 +1,21 @@
 import Foundation
 import CryptoKit
 
-enum StorageError: Error {
+enum StorageError: LocalizedError {
     case sealFailed
+    /// A vault sealed by a build from before files carried their role.
+    case preReleaseVault
+
+    var errorDescription: String? {
+        switch self {
+        case .sealFailed:
+            return "The vault could not be encrypted."
+        case .preReleaseVault:
+            return "This vault was written by a pre-release version of Clipvelope and "
+                + "cannot be opened by this one. Choose Start Fresh to begin a new vault; "
+                + "the old one is kept alongside it and is not deleted."
+        }
+    }
 }
 
 /// Lets tests supply a fixed key instead of reaching for the login Keychain,
@@ -64,39 +77,41 @@ final class EncryptedStorage {
     func saveIndex(_ state: AppState) throws {
         var state = state
         state.schemaVersion = AppState.currentSchemaVersion
-        try writeSealed(try JSONEncoder().encode(state), to: indexURL)
+        try writeSealed(try JSONEncoder().encode(state), to: indexURL, role: Self.indexRole)
     }
 
     func load() -> LoadOutcome {
         if FileManager.default.fileExists(atPath: indexURL.path) {
             do {
-                return .loaded(try decodeState(try readSealed(at: indexURL)))
+                return .loaded(try decodeState(try readSealed(at: indexURL, role: Self.indexRole)))
             } catch {
-                return .unreadable(error)
+                return isPreRelease(indexURL) ? .unreadable(StorageError.preReleaseVault)
+                                              : .unreadable(error)
             }
         }
+        // The pre-schema-4 blob predates roles by definition, so its mere
+        // existence is the answer; there is nothing to probe.
         if FileManager.default.fileExists(atPath: legacyBlobURL.path) {
-            return migrateLegacyBlob()
+            return .unreadable(StorageError.preReleaseVault)
         }
         return .fresh
     }
 
-    /// Reads the pre-schema-4 single blob and rewrites it as an index.
+    /// Whether a file opens under the vault key with no role, which is what a
+    /// build from before 1.0 wrote.
     ///
-    /// The original is moved aside rather than deleted, and only after the new
-    /// index is on disk, so a failure part-way through cannot lose history.
-    private func migrateLegacyBlob() -> LoadOutcome {
-        do {
-            let state = try decodeState(try readSealed(at: legacyBlobURL))
-            try saveIndex(state)
-            try? FileManager.default.moveItem(
-                at: legacyBlobURL,
-                to: directory.appendingPathComponent("clipboard.db.migrated")
-            )
-            return .loaded(state)
-        } catch {
-            return .unreadable(error)
-        }
+    /// It is recognised only so the app can say precisely what is wrong. The
+    /// plaintext is deliberately **never decoded or applied**, and this is the
+    /// single most important line in the file. Those builds sealed clipboard
+    /// payloads with no role either, and a payload's plaintext is chosen by
+    /// whoever writes the pasteboard: rich-text capture stores `public.html`
+    /// bytes verbatim, so any process could have had bytes of its choosing
+    /// sealed under this key. Parsing an unbound file here would let one of
+    /// those be copied over `index.cvi` and applied as vault state through the
+    /// load path, which does no disarming at all -- arming shell Quick Slots
+    /// and switching password-skipping off, permanently.
+    private func isPreRelease(_ url: URL) -> Bool {
+        (try? readSealed(at: url, role: nil)) != nil
     }
 
     private func decodeState(_ data: Data) throws -> AppState {
@@ -109,10 +124,15 @@ final class EncryptedStorage {
         return state
     }
 
-    /// Moves an unreadable index aside rather than deleting it, so a user whose
+    /// Moves an unreadable vault aside rather than deleting it, so a user whose
     /// Keychain was merely locked can still recover the ciphertext later.
+    ///
+    /// The payload files go with it. The index holds metadata and inline text
+    /// and not one byte of any image or formatted-text entry, so leaving
+    /// `items/` behind means the next launch's orphan sweep deletes every one of
+    /// them -- moments after the app promised the vault had been kept.
     @discardableResult
-    func quarantineUnreadableIndex() -> URL? {
+    func quarantineUnreadableVault() -> URL? {
         let source = FileManager.default.fileExists(atPath: indexURL.path) ? indexURL : legacyBlobURL
         guard FileManager.default.fileExists(atPath: source.path) else { return nil }
 
@@ -120,11 +140,19 @@ final class EncryptedStorage {
         let dest = directory.appendingPathComponent("\(source.lastPathComponent).unreadable-\(stamp)")
         do {
             try FileManager.default.moveItem(at: source, to: dest)
-            return dest
         } catch {
-            NSLog("Clipvelope quarantine error: \(error)")
+            NSLog("%@", "Clipvelope quarantine error: \(error)")
             return nil
         }
+        if FileManager.default.fileExists(atPath: payloadsDirectory.path) {
+            let payloads = directory.appendingPathComponent("items.unreadable-\(stamp)")
+            do {
+                try FileManager.default.moveItem(at: payloadsDirectory, to: payloads)
+            } catch {
+                NSLog("%@", "Clipvelope: kept the index but could not move its payloads aside: \(error)")
+            }
+        }
+        return dest
     }
 
     // MARK: - Payloads
@@ -135,11 +163,11 @@ final class EncryptedStorage {
 
     func writePayload(_ data: Data, for id: UUID) throws {
         try FileManager.default.createDirectory(at: payloadsDirectory, withIntermediateDirectories: true)
-        try writeSealed(data, to: payloadURL(for: id))
+        try writeSealed(data, to: payloadURL(for: id), role: Self.payloadRole(for: id))
     }
 
     func readPayload(for id: UUID) throws -> Data {
-        try readSealed(at: payloadURL(for: id))
+        try readSealed(at: payloadURL(for: id), role: Self.payloadRole(for: id))
     }
 
     func deletePayload(for id: UUID) {
@@ -159,13 +187,6 @@ final class EncryptedStorage {
         }
     }
 
-    func totalPayloadBytes() -> Int {
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: payloadsDirectory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        return urls.reduce(0) { total, url in
-            total + ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-        }
-    }
 
     // MARK: - Whole vault
 
@@ -177,14 +198,34 @@ final class EncryptedStorage {
 
     // MARK: - Sealing
 
-    private func writeSealed(_ plaintext: Data, to url: URL) throws {
-        let sealed = try AES.GCM.seal(plaintext, using: try keyStore.getOrCreateKey())
+    /// Every file is sealed under the one key, so the key alone cannot tell an
+    /// index from a payload: without more, a payload copied over `index.cvi`
+    /// would load as state, and `index.cvi` copied over a payload would be
+    /// decrypted and put on the pasteboard as if it were an image. The role is
+    /// authenticated as GCM associated data, so a box opens only in the role it
+    /// was written for -- and a payload only as the payload of its own item.
+    static let indexRole = Data("clipvelope/index/v1".utf8)
+
+    static func payloadRole(for id: UUID) -> Data {
+        Data("clipvelope/payload/v1/\(id.uuidString)".utf8)
+    }
+
+
+    private func writeSealed(_ plaintext: Data, to url: URL, role: Data) throws {
+        let sealed = try AES.GCM.seal(plaintext, using: try keyStore.getOrCreateKey(),
+                                      authenticating: role)
         guard let combined = sealed.combined else { throw StorageError.sealFailed }
         try combined.write(to: url, options: [.atomic])
     }
 
-    private func readSealed(at url: URL) throws -> Data {
+    /// `role: nil` opens a file written before roles existed. Only
+    /// `isPreRelease` passes it, and it discards the plaintext.
+    private func readSealed(at url: URL, role: Data?) throws -> Data {
         let box = try AES.GCM.SealedBox(combined: try Data(contentsOf: url))
-        return try AES.GCM.open(box, using: try keyStore.getOrCreateKey())
+        let key = try keyStore.getOrCreateKey()
+        if let role {
+            return try AES.GCM.open(box, using: key, authenticating: role)
+        }
+        return try AES.GCM.open(box, using: key)
     }
 }

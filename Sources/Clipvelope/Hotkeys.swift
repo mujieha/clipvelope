@@ -49,7 +49,7 @@ final class GlobalHotkeyCenter {
         let status = RegisterEventHotKey(combo.keyCode, combo.modifiers, hotKeyID,
                                          GetEventDispatcherTarget(), 0, &ref)
         guard status == noErr else {
-            NSLog("Clipvelope: could not register \(combo.displayName) to open the history (\(status))")
+            NSLog("%@", "Clipvelope: could not register \(combo.displayName) to open the history (\(status))")
             return false
         }
         openRef = ref
@@ -68,11 +68,11 @@ final class GlobalHotkeyCenter {
         for (index, keyCode) in Self.digitKeyCodes.enumerated() {
             if !add(keyCode: keyCode, modifiers: UInt32(optionKey), id: UInt32(index + 1)) {
                 // The rest still work.
-                NSLog("Clipvelope: could not register ⌥\(index + 1)")
+                NSLog("%@", "Clipvelope: could not register ⌥\(index + 1)")
                 unavailable.append(index + 1)
             }
         }
-        NSLog("Clipvelope: registered \(Self.digitKeyCodes.count - unavailable.count) of \(Self.digitKeyCodes.count) quick slot hotkeys")
+        NSLog("%@", "Clipvelope: registered \(Self.digitKeyCodes.count - unavailable.count) of \(Self.digitKeyCodes.count) quick slot hotkeys")
         return unavailable
     }
 
@@ -201,10 +201,23 @@ extension KeyCombo {
 
 // MARK: - Opening the panel
 
-/// Whether the history panel is on screen, reported by the panel itself.
-/// MenuBarExtra offers no way to ask, and no way to open its window either.
+/// Whether the history panel is on screen. MenuBarExtra offers no way to ask,
+/// so the panel's own NSWindow is recorded when the content view lands in it
+/// and its visibility is read directly. A flag set from onAppear/onDisappear
+/// was tried first and stuck at "open": the window is hidden, not closed, when
+/// the panel loses focus, so onDisappear never fires and every later `--open`
+/// became a no-op.
 enum PanelState {
-    static var isOpen = false
+    weak static var window: NSWindow?
+    static var isOpen: Bool { window?.isVisible ?? false }
+}
+
+/// The view MenuKeyHandler installs in the panel; it exists to learn the window.
+final class PanelHostView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window { PanelState.window = window }
+    }
 }
 
 enum PanelOpener {
@@ -236,37 +249,6 @@ enum PanelOpener {
     }
 }
 
-// MARK: - Hotkey
-
-final class HotkeyCenter {
-    static let shared = HotkeyCenter()
-    private var localMonitor: Any?
-    var onCommandF: (() -> Void)?
-
-    func start() {
-        guard localMonitor == nil else { return }
-        let handler: (NSEvent) -> NSEvent? = { [weak self] event in
-            // ⌥1-9 and ⌃⌥V are handled by GlobalHotkeyCenter, which sees the key
-            // even when Clipvelope is not frontmost.
-            if event.modifierFlags.contains(.command), event.keyCode == 3 {
-                self?.onCommandF?()
-                return nil
-            }
-            return event
-        }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            handler(event)
-        }
-    }
-
-    func stop() {
-        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
-        localMonitor = nil
-    }
-
-    deinit { stop() }
-}
-
 // MARK: - Menu Key Handler
 
 /// The keys the history panel answers to while the search field has focus:
@@ -286,7 +268,7 @@ struct MenuKeyHandler: NSViewRepresentable {
     let onPreferences: () -> Void
 
     func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
+        let view = PanelHostView(frame: .zero)
         context.coordinator.start(view: view)
         update(context.coordinator)
         return view

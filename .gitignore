@@ -25,15 +25,18 @@ Resources/embedded.provisionprofile
 /coverage
 *.log
 
-# Editors and tooling state
+# Editors, tooling state and the maintainer's local notes
 .vscode/
 .claude/
 CLAUDE.md
 .remember/
+notes/
+scripts/hooks/
 
 # Anything that could be a credential or a key. Signing identities live in the
 # Keychain, the Sparkle key is exported only to a backup outside the repository.
 *.p12
+*.p8
 *.cer
 *.pem
 *.key

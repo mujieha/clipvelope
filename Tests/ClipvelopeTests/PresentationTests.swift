@@ -179,12 +179,18 @@ final class PanelModelTests: XCTestCase {
 }
 
 final class StripContentTests: XCTestCase {
-    private func strip(isLoading: Bool = false, savingPaused: Bool = false, capturePaused: Bool = false,
-                       recordingPasswords: Bool = false, itemCount: Int = 3,
+    private func strip(isLoading: Bool = false, savingPaused: Bool = false, saveFailed: Bool = false,
+                       capturePaused: Bool = false, recordingPasswords: Bool = false, itemCount: Int = 3,
                        notice: String? = nil) -> StripContent {
-        StripContent.describe(isLoading: isLoading, savingPaused: savingPaused,
+        StripContent.describe(isLoading: isLoading, savingPaused: savingPaused, saveFailed: saveFailed,
                               capturePaused: capturePaused, recordingPasswords: recordingPasswords,
                               itemCount: itemCount, notice: notice)
+    }
+
+    func testAFailedSaveIsNotCalledASuspendedVault() {
+        XCTAssertEqual(strip(saveFailed: true).text, "The last change could not be saved.")
+        XCTAssertEqual(strip(savingPaused: true, saveFailed: true).text, "Saving paused.")
+        XCTAssertTrue(strip(saveFailed: true).degraded)
     }
 
     func testCountsAreSentencesWithCorrectPlurals() {

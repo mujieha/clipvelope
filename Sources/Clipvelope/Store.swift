@@ -16,11 +16,19 @@ final class ClipboardStore: ObservableObject {
     /// True until the vault has been read. The menu must not claim the history
     /// is empty before it knows: reading the key can take seconds the first time
     /// a newly signed build runs, while macOS validates its signature.
+    @Published private(set) var isLoading = true
     /// Set when an import changed what it was given. Shown in the Backup tab,
     /// because a silent adjustment is indistinguishable from a silent failure.
     @Published private(set) var importNotice: String?
-    @Published private(set) var isLoading = true
+    /// The vault could not be read, or the last save failed. Which one is
+    /// `writesSuspended`; the two must never be offered the same remedy.
     @Published private(set) var storageFailure: StorageFailure?
+    /// True while the vault on disk could not be read and every write is refused.
+    /// Only this state may offer "Start Fresh": a failed save or a failed backup
+    /// must never lead to a readable vault being quarantined.
+    @Published private(set) var writesSuspended = false
+    /// The last backup operation that failed, shown next to the button that ran it.
+    @Published private(set) var backupFailure: String?
     @Published private(set) var items: [ClipboardItem] = []
     @Published var bindings: [ClipboardBinding] = []
     @Published var folders: [CommandFolder] = []
@@ -51,6 +59,12 @@ final class ClipboardStore: ObservableObject {
     /// `storage.keyStore`, so the vault and its backups cannot diverge.
     private let autoBackupPasswordStore = KeychainKeyStore()
     private let maxItems = 200
+    /// A ceiling on what one untrusted backup may install, well above any vault
+    /// this app produces and far below a file built to fill a disk.
+    static let maxImportedItems = 1_000
+    /// And a ceiling on the total inline text it may install, because every byte
+    /// of it is re-encrypted on every copy for as long as it stays in the vault.
+    static let maxImportedInlineBytes = 32 * 1024 * 1024
     /// Ceiling on stored image bytes. A count-based cap alone would happily
     /// hold 200 screenshots.
     private let maxPayloadBytes = 512 * 1024 * 1024
@@ -68,10 +82,6 @@ final class ClipboardStore: ObservableObject {
         return dir.appendingPathComponent("clipvelope-backup.cvb")
     }
 
-    /// Set when the vault exists but could not be read. While true, every write is
-    /// refused: persisting over an unreadable file is what previously destroyed
-    /// history that was only temporarily inaccessible (locked Keychain, denied ACL).
-    private var persistenceSuspended = false
     private var hasLoaded = false
 
     /// Every vault operation runs here. Encryption and disk writes are merely slow,
@@ -177,26 +187,35 @@ final class ClipboardStore: ObservableObject {
         switch outcome {
         case .fresh:
             apply(.empty)
-            persistenceSuspended = false
+            writesSuspended = false
             storageFailure = nil
         case .loaded(let state):
             apply(state)
-            persistenceSuspended = false
+            writesSuspended = false
             storageFailure = nil
         case .unreadable(let error):
-            persistenceSuspended = true
+            writesSuspended = true
+            // A pre-release vault explains itself; anything else is almost
+            // always the Keychain, and guessing that out loud has been more
+            // useful to people than the underlying CryptoKit message.
+            let reason: String
+            if case StorageError.preReleaseVault = error {
+                reason = error.localizedDescription
+            } else {
+                reason = "This usually means the Keychain was locked or access was "
+                    + "denied. (\(error.localizedDescription))"
+            }
             storageFailure = StorageFailure(
-                message: "Your vault could not be decrypted, so saving is paused to "
-                    + "protect it. This usually means the Keychain was locked or access "
-                    + "was denied. (\(error.localizedDescription))"
+                message: "Your vault could not be read, so saving is paused to protect it. "
+                    + reason
             )
-            NSLog("Clipvelope: vault unreadable, writes suspended: \(error)")
+            NSLog("%@", "Clipvelope: vault unreadable, writes suspended: \(error)")
         }
         hasLoaded = true
         isLoading = false
         // Sweep payload files nothing refers to any more -- the residue of a crash
         // between writing a payload and saving the index.
-        if !persistenceSuspended {
+        if !writesSuspended {
             let live = Set(items.map(\.id))
             ioQueue.async { [weak self] in self?.storage.deletePayloads(notIn: live) }
         }
@@ -206,9 +225,13 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func apply(_ state: AppState) {
-        items = state.items
-        bindings = state.bindings
-        folders = state.folders
+        items = state.items.removingDuplicateIDs()
+        bindings = state.bindings.removingDuplicateIDs()
+        folders = state.folders.removingDuplicateIDs().map {
+            var folder = $0
+            folder.items = folder.items.removingDuplicateIDs()
+            return folder
+        }
         autoBackupEnabled = state.autoBackupEnabled
         autoBackupMode = state.autoBackupMode
         themeMode = state.themeMode
@@ -270,17 +293,21 @@ final class ClipboardStore: ObservableObject {
 
     /// Retry after the user has unlocked the Keychain or granted access.
     func retryLoadingVault() {
+        guard writesSuspended else { return }
         loadFromStorage()
     }
 
     /// Give up on the unreadable file: move it aside (not delete it) and resume writing.
+    /// Refused unless the vault really is unreadable: called against a readable
+    /// vault this would quarantine the user's whole history.
     func discardUnreadableVault() {
+        guard writesSuspended else { return }
         apply(.empty)
         ioQueue.async { [weak self] in
             guard let self else { return }
-            storage.quarantineUnreadableIndex()
+            storage.quarantineUnreadableVault()
             DispatchQueue.main.async {
-                self.persistenceSuspended = false
+                self.writesSuspended = false
                 self.storageFailure = nil
                 self.persist()
             }
@@ -288,7 +315,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func persist() {
-        guard hasLoaded, !persistenceSuspended else { return }
+        guard hasLoaded, !writesSuspended else { return }
         let snapshot = currentState
         let shouldBackUp = autoBackupEnabled
         ioQueue.async { [weak self] in
@@ -296,7 +323,7 @@ final class ClipboardStore: ObservableObject {
             do {
                 try storage.saveIndex(snapshot)
             } catch {
-                NSLog("Clipvelope save error: \(error)")
+                NSLog("%@", "Clipvelope save error: \(error)")
                 DispatchQueue.main.async {
                     self.storageFailure = StorageFailure(
                         message: "Could not save to your vault. (\(error.localizedDescription))"
@@ -353,7 +380,7 @@ final class ClipboardStore: ObservableObject {
                 do {
                     try storage.writePayload(payloadBytes, for: id)
                 } catch {
-                    NSLog("Clipvelope: could not write payload for \(id): \(error)")
+                    NSLog("%@", "Clipvelope: could not write payload for \(id): \(error)")
                 }
             }
         }
@@ -401,7 +428,7 @@ final class ClipboardStore: ObservableObject {
             ioQueue.async { [weak self] in
                 guard let self else { return }
                 guard let data = try? storage.readPayload(for: item.id) else {
-                    NSLog("Clipvelope: payload missing for \(item.id)")
+                    NSLog("%@", "Clipvelope: payload missing for \(item.id)")
                     DispatchQueue.main.async {
                         self.copyText(info.plainText)
                         self.showNotice("The formatting for that entry was missing, so plain text was copied.")
@@ -425,10 +452,14 @@ final class ClipboardStore: ObservableObject {
             // The payload is a file now, so reading it is I/O.
             ioQueue.async { [weak self] in
                 guard let self else { return }
-                guard let data = try? storage.readPayload(for: item.id) else {
+                // The role binding already guarantees these bytes were written as
+                // this item's payload; checking the signature as well means nothing
+                // that is not a PNG is ever offered to other apps as one.
+                guard let data = try? storage.readPayload(for: item.id),
+                      data.starts(with: ClipboardMonitor.pngSignature) else {
                     // A row that looks like an image but cannot produce one is
                     // worse than no row: take it out and say why.
-                    NSLog("Clipvelope: payload missing for \(item.id)")
+                    NSLog("%@", "Clipvelope: payload missing or not a PNG for \(item.id)")
                     DispatchQueue.main.async {
                         self.remove(item)
                         self.showNotice("That image's file was missing, so the entry was removed.")
@@ -493,17 +524,30 @@ final class ClipboardStore: ObservableObject {
             task.arguments = ["-lc", command]
             let pipe = Pipe()
             task.standardOutput = pipe
-            task.standardError = Pipe()
+            // Discarded rather than piped: an unread pipe fills at 64 KB and then
+            // blocks the command until the timeout kills it.
+            task.standardError = FileHandle.nullDevice
+
+            func fail(_ reason: String) {
+                DispatchQueue.main.async {
+                    self.showNotice("Quick Slot command \(reason); the clipboard was left alone.")
+                }
+            }
 
             do {
                 try task.run()
             } catch {
-                NSLog("Shell command error: \(error)")
+                NSLog("%@", "Shell command error: \(error)")
+                fail("could not start")
                 return
             }
 
+            var timedOut = false
             let timeout = DispatchWorkItem {
-                if task.isRunning { task.terminate() }
+                if task.isRunning {
+                    timedOut = true
+                    task.terminate()
+                }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + Self.shellTimeout,
                                               execute: timeout)
@@ -514,7 +558,19 @@ final class ClipboardStore: ObservableObject {
             task.waitUntilExit()
             timeout.cancel()
 
-            guard let output = String(data: data, encoding: .utf8) else { return }
+            // A failed command must not replace the clipboard with its silence.
+            if timedOut {
+                fail("did not finish within \(Int(Self.shellTimeout)) seconds")
+                return
+            }
+            guard task.terminationStatus == 0 else {
+                fail("failed (exit \(task.terminationStatus))")
+                return
+            }
+            guard let output = String(data: data, encoding: .utf8) else {
+                fail("produced output that is not text")
+                return
+            }
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             DispatchQueue.main.async { self.copyText(trimmed) }
         }
@@ -574,20 +630,39 @@ final class ClipboardStore: ObservableObject {
         folders = []
         thumbnailCache.removeAll()
         autoBackupWork?.cancel()
-        storage.clear()
-        try? FileManager.default.removeItem(at: autoBackupURL)
-        persistenceSuspended = false
+        writesSuspended = false
         storageFailure = nil
-        persist()
+        backupFailure = nil
+        // On the I/O queue, behind any payload write still in flight. Done on the
+        // main thread this raced a queued write, which recreated the payload
+        // directory and left the last copied image on disk after "Delete Everything".
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            storage.clear()
+            try? FileManager.default.removeItem(at: autoBackupURL)
+            DispatchQueue.main.async { self.persist() }
+        }
     }
 
     // MARK: Backup
 
     static func decodeSnapshot(_ data: Data) throws -> VaultSnapshot {
-        if let snapshot = try? JSONDecoder().decode(VaultSnapshot.self, from: data) {
-            return snapshot
+        // AppState decodes every field with a default, deliberately, so that a
+        // vault from any version stays readable. The flip side is that any JSON
+        // object "decodes" -- `{}` becomes an empty vault -- and an import applies
+        // what it decodes. So a backup must carry the one field every vault has
+        // had since the first version before it is accepted as one.
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Not a backup"))
+        }
+        if let state = object["state"] as? [String: Any], state["items"] != nil {
+            return try JSONDecoder().decode(VaultSnapshot.self, from: data)
         }
         // Backups written before payloads existed were a bare AppState.
+        guard object["items"] != nil else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [],
+                                                    debugDescription: "Not a Clipvelope backup: no items"))
+        }
         return VaultSnapshot(state: try JSONDecoder().decode(AppState.self, from: data),
                              payloads: [:])
     }
@@ -597,7 +672,7 @@ final class ClipboardStore: ObservableObject {
             var payloads: [String: Data] = [:]
             for item in state.items where item.hasPayloadFile {
                 guard let data = try? storage.readPayload(for: item.id) else {
-                    NSLog("Clipvelope: payload missing for \(item.id), excluded from backup")
+                    NSLog("%@", "Clipvelope: payload missing for \(item.id), excluded from backup")
                     continue
                 }
                 payloads[item.id.uuidString] = data
@@ -611,12 +686,11 @@ final class ClipboardStore: ObservableObject {
                 sealed = try BackupCodec.seal(json, keychainKey: try storage.keyStore.getOrCreateKey())
             }
             try sealed.write(to: url, options: [.atomic])
+            DispatchQueue.main.async { self.backupFailure = nil }
         } catch {
-            NSLog("Export error: \(error)")
+            NSLog("%@", "Export error: \(error)")
             DispatchQueue.main.async {
-                self.storageFailure = StorageFailure(
-                    message: "Could not write that backup. (\(error.localizedDescription))"
-                )
+                self.backupFailure = "Could not write that backup. (\(error.localizedDescription))"
             }
         }
     }
@@ -624,9 +698,12 @@ final class ClipboardStore: ObservableObject {
     /// How far a backup is trusted.
     ///
     /// A keychain-mode backup can only have been produced by something holding
-    /// this Mac's Keychain key, which in practice means the user. A password
-    /// backup is portable by design and can come from anyone, so everything in
-    /// it is untrusted input.
+    /// this Mac's Keychain key, which in practice means the user. That holds
+    /// because every box the app seals under that key is bound to its role:
+    /// a vault payload -- whose plaintext any app can choose by putting it on
+    /// the pasteboard -- cannot be presented as a backup. A password backup is
+    /// portable by design and can come from anyone, so everything in it is
+    /// untrusted input.
     private enum BackupTrust {
         case deviceBound
         case portable
@@ -666,19 +743,123 @@ final class ClipboardStore: ObservableObject {
             notes.append("The backup had password-skipping switched off; it was left on.")
         }
         // Union, so an import can add apps to ignore but never remove them.
+        // Adding is the safe direction for privacy but stops capture, so it is
+        // still a change the user should hear about.
+        let newlyIgnored = Set(state.ignoredAppBundleIDs).subtracting(ignoredAppBundleIDs)
         state.ignoredAppBundleIDs = Array(Set(state.ignoredAppBundleIDs)
             .union(ignoredAppBundleIDs)).sorted()
+        if !newlyIgnored.isEmpty {
+            notes.append("\(newlyIgnored.count) app\(newlyIgnored.count == 1 ? "" : "s") "
+                         + "the backup listed will now be skipped when you copy from "
+                         + "\(newlyIgnored.count == 1 ? "it" : "them").")
+        }
         state.captureSuspended = captureSuspended
         // Shortcuts are this Mac's business, not the backup's.
         state.openHotkey = openHotkey
         state.preferencesHotkey = preferencesHotkey
 
+        // Where and whether this Mac writes its own backups is the user's
+        // choice, not a setting a file gets to carry. A backup asking for
+        // auto-backup would start mirroring the whole vault into ~/Documents
+        // after every copy; one that merely omits the fields decodes them as
+        // off, which would silently retire a backup the user relies on.
+        state.autoBackupEnabled = autoBackupEnabled
+        state.autoBackupMode = autoBackupMode
+
+        // A file row holds a path, and pasting it hands the target that file.
+        // The paths in someone else's backup describe their machine, so at
+        // best they are dead and at worst they name something worth stealing
+        // on this one -- ~/.ssh/id_rsa under a row labelled like a report.
+        // Everything below is one budget rather than a set of separate caps,
+        // because a per-entry limit does not bound a total: a thousand entries
+        // each just under it is still gigabytes. All of this text lives inline
+        // in the index, which is re-encrypted and rewritten on every single
+        // copy, and no policy ever trims it -- so whatever an import installs
+        // here is a tax on every copy the user makes from now on. Pinned rows
+        // are exempt from the history cap by design, which is exactly why a
+        // file may not choose how many there are.
+        var remaining = Self.maxImportedInlineBytes
+        func affordable(_ text: String) -> Bool {
+            let cost = text.utf8.count
+            guard cost <= ClipboardMonitor.maxTextBytes, cost <= remaining else { return false }
+            remaining -= cost
+            return true
+        }
+
+        let itemsBefore = state.items.count
+        state.items = Array(state.items.prefix(Self.maxImportedItems))
+            .filter { affordable($0.searchText) }
+        if state.items.count < itemsBefore {
+            let dropped = itemsBefore - state.items.count
+            notes.append("\(dropped) entr\(dropped == 1 ? "y was" : "ies were") left out for "
+                         + "being oversized, or beyond the \(Self.maxImportedItems) an import "
+                         + "may bring.")
+        }
+
+        let bindingsBefore = state.bindings.count
+        state.bindings = Array(state.bindings.prefix(Self.maxImportedItems))
+            .filter { affordable($0.title + $0.content) }
+        let foldersBefore = state.folders.reduce(state.folders.count) { $0 + $1.items.count }
+        state.folders = Array(state.folders.prefix(Self.maxImportedItems))
+            .filter { affordable($0.name) }
+            .map { folder in
+                var folder = folder
+                folder.items = Array(folder.items.prefix(Self.maxImportedItems))
+                    .filter { affordable($0.title + $0.content) }
+                return folder
+            }
+        let foldersAfter = state.folders.reduce(state.folders.count) { $0 + $1.items.count }
+        let commandsDropped = (bindingsBefore - state.bindings.count) + (foldersBefore - foldersAfter)
+        if commandsDropped > 0 {
+            // Losing a Quick Slot without being told is indistinguishable from
+            // the feature quietly breaking.
+            notes.append("\(commandsDropped) Quick Slot\(commandsDropped == 1 ? " or folder command was" : "s or folder commands were") "
+                         + "left out for the same reason.")
+        }
+
+        let fileItems = state.items.filter { if case .files = $0.content { return true } else { return false } }
+        if !fileItems.isEmpty {
+            state.items.removeAll { if case .files = $0.content { return true } else { return false } }
+            notes.append("\(fileItems.count) file reference\(fileItems.count == 1 ? " was" : "s were") "
+                         + "left out: they point at files on the machine that wrote the backup.")
+        }
+
         return (state, notes)
+    }
+
+    /// Whether a payload out of a backup is really the thing its item claims,
+    /// and stays inside the limits capture enforces.
+    static func payloadIsAcceptable(_ data: Data, for content: ClipboardContent) -> Bool {
+        switch content {
+        case .image:
+            guard data.count <= ClipboardMonitor.maxImageBytes,
+                  data.starts(with: ClipboardMonitor.pngSignature),
+                  let size = ClipboardMonitor.declaredPixelSize(of: data),
+                  ClipboardMonitor.acceptsImage(pixelWidth: size.0, pixelHeight: size.1)
+            else { return false }
+            return true
+        case .richText:
+            return data.count <= ClipboardMonitor.maxRichTextBytes
+        case .text, .files:
+            // Neither keeps a payload file, so a payload claiming to be one is
+            // not something this app wrote.
+            return false
+        }
     }
 
     private func importState(from url: URL, password: String?) {
         do {
             let data = try Data(contentsOf: url)
+            // Pre-release builds wrote headerless files. Those are refused now,
+            // and saying so beats the generic "check the password".
+            guard !BackupCodec.isPreReleaseFormat(data) else {
+                DispatchQueue.main.async {
+                    self.backupFailure = "That file was written by a pre-release version of "
+                        + "Clipvelope, whose backup format is no longer accepted. Export a "
+                        + "fresh backup from a vault you can still open."
+                }
+                return
+            }
             let decrypted: Data
             if let password {
                 decrypted = try BackupCodec.open(data, password: password)
@@ -686,42 +867,68 @@ final class ClipboardStore: ObservableObject {
                 decrypted = try BackupCodec.open(data, keychainKey: try storage.keyStore.getOrCreateKey())
             }
             let trust: BackupTrust = password == nil ? .deviceBound : .portable
-            let wasLegacy = BackupCodec.isLegacyFormat(data)
             let snapshot = try Self.decodeSnapshot(decrypted)
+
+            // Payload bytes come out of the file, and an image payload is decoded
+            // later to draw a thumbnail. Capture checks a picture's declared size
+            // before decoding it precisely so a small file cannot demand an
+            // enormous raster; a backup is the same hostile input and gets the
+            // same check, against what its own item claims to be.
+            let declared = Dictionary(snapshot.state.items.map { ($0.id, $0.content) },
+                                      uniquingKeysWith: { first, _ in first })
+            var rejected: Set<UUID> = []
             for (key, data) in snapshot.payloads {
                 guard let id = UUID(uuidString: key) else { continue }
+                guard let content = declared[id],
+                      Self.payloadIsAcceptable(data, for: content) else {
+                    rejected.insert(id)
+                    continue
+                }
                 try? storage.writePayload(data, for: id)
             }
+
             let imported = snapshot.state
             DispatchQueue.main.async {
                 var notes: [String] = []
-                let state: AppState
+                var state: AppState
                 switch trust {
                 case .deviceBound:
                     state = imported
                 case .portable:
                     (state, notes) = self.disarming(imported)
                 }
-                if wasLegacy {
-                    notes.append("This backup used the old format, whose password "
-                                 + "protection is weak. Export it again to upgrade it.")
+                if !rejected.isEmpty {
+                    let before = state.items.count
+                    state.items.removeAll { rejected.contains($0.id) }
+                    let dropped = before - state.items.count
+                    if dropped > 0 {
+                        notes.append("\(dropped) entr\(dropped == 1 ? "y was" : "ies were") left "
+                                     + "out: what the backup stored for \(dropped == 1 ? "it" : "them") "
+                                     + "did not match what it said \(dropped == 1 ? "it" : "they") "
+                                     + "contained.")
+                    }
                 }
 
+                if self.writesSuspended {
+                    // The unreadable index is ciphertext that may still decrypt once
+                    // the right key is back. A successful import replaces the vault,
+                    // but it must not write over that file.
+                    self.storage.quarantineUnreadableVault()
+                }
                 self.apply(state)
                 // A successful import is authoritative: it clears a suspended vault.
-                self.persistenceSuspended = false
+                self.writesSuspended = false
                 self.storageFailure = nil
+                self.backupFailure = nil
                 self.hasLoaded = true
                 self.importNotice = notes.isEmpty ? nil : notes.joined(separator: " ")
                 self.persist()
             }
         } catch {
-            NSLog("Import error: \(error)")
+            NSLog("%@", "Import error: \(error)")
             DispatchQueue.main.async {
-                self.storageFailure = StorageFailure(
-                    message: "Could not read that backup. If it was exported with a "
-                        + "password, check the password. (\(error.localizedDescription))"
-                )
+                self.backupFailure = "Could not read that backup. If it was exported with a "
+                    + "password, check the password. (\(error.localizedDescription))"
             }
         }
     }
@@ -784,8 +991,19 @@ final class ClipboardStore: ObservableObject {
         let snapshot = currentState
         ioQueue.async { [weak self] in
             guard let self else { return }
-            let password = (snapshot.autoBackupMode == .password)
-                ? autoBackupPasswordStore.loadAutoBackupPassword() : nil
+            var password: String?
+            if snapshot.autoBackupMode == .password {
+                guard let saved = autoBackupPasswordStore.loadAutoBackupPassword() else {
+                    // Falling back to the keychain key would write a file the user
+                    // believes is portable and cannot open anywhere else. Say so instead.
+                    DispatchQueue.main.async {
+                        self.backupFailure = "Auto backup is set to Password, but no password is "
+                            + "saved. Enter one and click Use the Password Above."
+                    }
+                    return
+                }
+                password = saved
+            }
             exportState(snapshot, to: autoBackupURL, password: password)
         }
     }
@@ -797,7 +1015,14 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    func saveAutoBackupPassword(_ password: String) {
-        autoBackupPasswordStore.saveAutoBackupPassword(password)
+    /// False, with `backupFailure` set, when the Keychain refused the write.
+    @discardableResult
+    func saveAutoBackupPassword(_ password: String) -> Bool {
+        if let error = autoBackupPasswordStore.saveAutoBackupPassword(password) {
+            backupFailure = "Could not save the password to the Keychain. (\(error.localizedDescription))"
+            return false
+        }
+        backupFailure = nil
+        return true
     }
 }

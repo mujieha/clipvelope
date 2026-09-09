@@ -30,6 +30,7 @@ final class KeychainKeyStore {
     private let service = "com.mujieha.Clipvelope"
     private let account = "clipboard-key"
     private let autoBackupPasswordAccount = "auto-backup-password"
+    private let remoteControlTokenAccount = "remote-control-token"
 
     /// Probed once, with a write.
     ///
@@ -55,7 +56,6 @@ final class KeychainKeyStore {
         return available
     }()
 
-    var isKeyIsolated: Bool { Self.usesDataProtectionKeychain }
 
     // MARK: - Encryption key
 
@@ -80,7 +80,7 @@ final class KeychainKeyStore {
                     delete(account: account, dataProtection: false)
                     NSLog("Clipvelope: migrated the encryption key to the data protection keychain")
                 } catch {
-                    NSLog("Clipvelope: key migration failed, continuing with the file keychain: \(error)")
+                    NSLog("%@", "Clipvelope: key migration failed, continuing with the file keychain: \(error)")
                 }
                 return SymmetricKey(data: legacy)
             }
@@ -118,9 +118,23 @@ final class KeychainKeyStore {
                       dataProtection: Self.usesDataProtectionKeychain)
             return nil
         } catch {
-            NSLog("Clipvelope: could not save the auto-backup password: \(error)")
+            NSLog("%@", "Clipvelope: could not save the auto-backup password: \(error)")
             return error
         }
+    }
+
+    // MARK: - Remote-control token
+
+    /// See RemoteControl. Overwritten on every launch, so it never outlives the
+    /// instance it authenticates by more than one restart.
+    func saveRemoteControlToken(_ token: Data) throws {
+        try write(token, account: remoteControlTokenAccount,
+                  dataProtection: Self.usesDataProtectionKeychain)
+    }
+
+    func loadRemoteControlToken() -> Data? {
+        try? read(account: remoteControlTokenAccount,
+                  dataProtection: Self.usesDataProtectionKeychain)
     }
 
     // MARK: - Primitives
@@ -152,12 +166,18 @@ final class KeychainKeyStore {
     }
 
     private func write(_ data: Data, account: String, dataProtection: Bool) throws {
-        delete(account: account, dataProtection: dataProtection)
+        // Update in place when the item exists. Deleting first and then failing to
+        // add would destroy the previous value, and for the vault key the previous
+        // value is the only way to read the history.
+        let query = baseQuery(account: account, dataProtection: dataProtection)
+        let updated = SecItemUpdate(query as CFDictionary,
+                                    [kSecValueData as String: data] as CFDictionary)
+        if updated == errSecSuccess { return }
+        guard updated == errSecItemNotFound else { throw KeychainError.unhandled(updated) }
 
-        var attributes = baseQuery(account: account, dataProtection: dataProtection)
+        var attributes = query
         attributes[kSecValueData as String] = data
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-
         let status = SecItemAdd(attributes as CFDictionary, nil)
         guard status == errSecSuccess else { throw KeychainError.unhandled(status) }
     }

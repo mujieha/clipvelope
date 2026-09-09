@@ -33,12 +33,45 @@ if otool -L "$APP/Contents/MacOS/Clipvelope" 2>/dev/null | grep -q Sparkle; then
     fi
     mkdir -p "$APP/Contents/Frameworks"
     cp -R "$SPARKLE" "$APP/Contents/Frameworks/"
+    # Sparkle's license requires its notice to travel with the software.
+    cp docs/THIRD-PARTY-LICENSES.md "$APP/Contents/Resources/THIRD-PARTY-LICENSES.md"
     install_name_tool -add_rpath "@executable_path/../Frameworks" \
         "$APP/Contents/MacOS/Clipvelope" 2>/dev/null || true
     echo "embedded $(basename "$SPARKLE")"
 fi
 cp Resources/Info.plist "$APP/Contents/Info.plist"
-cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp Resources/MenuBarIcon.pdf "$APP/Contents/Resources/MenuBarIcon.pdf"
+
+# App icon. Resources/Clipvelope.icon is an Icon Composer document; actool
+# compiles it into the layered Assets.car that macOS 26 draws with Liquid Glass.
+# actool's own .icns fallback stops at 256 px, so the .icns shipped alongside is
+# rendered by the system itself at every size (see render-app-icon.swift).
+XCODE_DEV="${DEVELOPER_DIR:-$(xcode-select -p)}"
+if [ ! -x "$XCODE_DEV/usr/bin/actool" ]; then
+    for candidate in /Applications/Xcode.app /Applications/Xcode_*.app /Applications/Xcode*.app; do
+        if [ -x "$candidate/Contents/Developer/usr/bin/actool" ]; then
+            XCODE_DEV="$candidate/Contents/Developer"; break
+        fi
+    done
+fi
+if [ ! -x "$XCODE_DEV/usr/bin/actool" ]; then
+    echo "error: actool not found. Xcode is required to compile Resources/Clipvelope.icon." >&2
+    exit 1
+fi
+ICONBUILD=$(mktemp -d)
+if ! DEVELOPER_DIR="$XCODE_DEV" xcrun actool Resources/Clipvelope.icon --compile "$ICONBUILD" \
+        --platform macosx --minimum-deployment-target 26.0 --app-icon Clipvelope \
+        --include-all-app-icons --output-partial-info-plist "$ICONBUILD/partial.plist" \
+        --output-format human-readable-text > "$ICONBUILD/actool.log" 2>&1; then
+    cat "$ICONBUILD/actool.log" >&2
+    exit 1
+fi
+cp "$ICONBUILD/Assets.car" "$APP/Contents/Resources/Assets.car"
+cp "$ICONBUILD/Clipvelope.icns" "$APP/Contents/Resources/Clipvelope.icns"
+swift scripts/render-app-icon.swift "$APP" "$ICONBUILD/full.icns" > /dev/null
+cp "$ICONBUILD/full.icns" "$APP/Contents/Resources/Clipvelope.icns"
+rm -rf "$ICONBUILD"
+echo "compiled the app icon"
 
 # Signing identity.
 #
