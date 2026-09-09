@@ -36,10 +36,12 @@ released, and you will be credited in the changelog unless you prefer not to be.
 - A vault that cannot be decrypted is never overwritten.
 - Every encrypted file this version writes is bound to its role, the index or
   the payload of one specific item, so a file the app wrote for one purpose
-  cannot be presented to it as another, and a backup must carry its header. The
-  one exception is deliberate and single-use: a vault written before 1.0 carries
-  no role, so the first launch after upgrading accepts an unbound index once and
-  immediately rewrites it bound.
+  cannot be presented to it as another, and a backup must carry its header. A
+  vault written before 1.0 carries no role, and rather than accept one this
+  version refuses to open it and says so: those builds sealed clipboard payloads
+  with no role too, and a payload's contents are chosen by whoever writes the
+  pasteboard, so accepting an unbound file would let one be copied over the
+  index and applied as vault state.
 - `Clipvelope --open` and `--preferences` ignore a bare notification on their
   name; a request must carry the token this launch stored in the app's Keychain
   item. Read the first known limit below for what that does and does not buy.
@@ -60,8 +62,8 @@ suggestion, but it is not a vulnerability report.
   that merely posts a notification, which costs an attacker nothing; it cannot
   stop one that runs the app. No peer check would change this, because the
   caller really is Clipvelope. Displaying the panel discloses history only to
-  something that can also see the screen, which macOS gates behind Screen
-  Recording consent.
+  something that can also read the screen, which macOS gates behind Screen
+  Recording or Accessibility consent.
 - **An unsigned build protects nothing from other programs you run.** Without a
   signing identity there is no data protection keychain, so both the vault key
   and that token live in the file keychain, which any program you run can read.

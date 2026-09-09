@@ -27,10 +27,6 @@ final class ClipboardStore: ObservableObject {
     /// Only this state may offer "Start Fresh": a failed save or a failed backup
     /// must never lead to a readable vault being quarantined.
     @Published private(set) var writesSuspended = false
-    /// True only when the vault could not be *decrypted*. "Start Fresh" moves
-    /// the vault aside, so it must never be offered for a vault that read
-    /// perfectly and merely could not be written back.
-    @Published private(set) var canDiscardVault = false
     /// The last backup operation that failed, shown next to the button that ran it.
     @Published private(set) var backupFailure: String?
     @Published private(set) var items: [ClipboardItem] = []
@@ -189,33 +185,26 @@ final class ClipboardStore: ObservableObject {
         case .fresh:
             apply(.empty)
             writesSuspended = false
-            canDiscardVault = false
             storageFailure = nil
         case .loaded(let state):
             apply(state)
             writesSuspended = false
-            canDiscardVault = false
             storageFailure = nil
-        case .loadedButUnwritable(let state, let error):
-            // The history is here and is shown. Only saving stops, and the
-            // remedy offered is the one that fits: free space, then retry.
-            apply(state)
-            writesSuspended = true
-            canDiscardVault = false
-            storageFailure = StorageFailure(
-                message: "Your history is here and readable, but Clipvelope could not "
-                    + "finish updating its own files, so saving is paused rather than "
-                    + "leave the vault half-updated. This usually means the disk is "
-                    + "full or its folder is read-only. (\(error.localizedDescription))"
-            )
-            NSLog("%@", "Clipvelope: vault readable but not writable, writes suspended: \(error)")
         case .unreadable(let error):
             writesSuspended = true
-            canDiscardVault = true
+            // A pre-release vault explains itself; anything else is almost
+            // always the Keychain, and guessing that out loud has been more
+            // useful to people than the underlying CryptoKit message.
+            let reason: String
+            if case StorageError.preReleaseVault = error {
+                reason = error.localizedDescription
+            } else {
+                reason = "This usually means the Keychain was locked or access was "
+                    + "denied. (\(error.localizedDescription))"
+            }
             storageFailure = StorageFailure(
-                message: "Your vault could not be decrypted, so saving is paused to "
-                    + "protect it. This usually means the Keychain was locked or access "
-                    + "was denied. (\(error.localizedDescription))"
+                message: "Your vault could not be read, so saving is paused to protect it. "
+                    + reason
             )
             NSLog("%@", "Clipvelope: vault unreadable, writes suspended: \(error)")
         }
@@ -309,7 +298,7 @@ final class ClipboardStore: ObservableObject {
     /// Refused unless the vault really is unreadable: called against a readable
     /// vault this would quarantine the user's whole history.
     func discardUnreadableVault() {
-        guard writesSuspended, canDiscardVault else { return }
+        guard writesSuspended else { return }
         apply(.empty)
         ioQueue.async { [weak self] in
             guard let self else { return }
@@ -788,6 +777,25 @@ final class ClipboardStore: ObservableObject {
             state.items.removeAll { ids.contains($0.id) }
             notes.append("\(ids.count) oversized entr\(ids.count == 1 ? "y was" : "ies were") left out.")
         }
+        // Quick Slots and folder commands live inline in the index exactly as
+        // item text does, are re-encrypted on every single copy, and no policy
+        // ever trims them -- so an oversized one taxes every copy forever.
+        let longCommand = { (text: String) in text.utf8.count > ClipboardMonitor.maxTextBytes }
+        let fatBindings = state.bindings.filter { longCommand($0.content) || longCommand($0.title) }
+        if !fatBindings.isEmpty {
+            let ids = Set(fatBindings.map(\.id))
+            state.bindings.removeAll { ids.contains($0.id) }
+        }
+        for folder in state.folders.indices {
+            state.folders[folder].items.removeAll { longCommand($0.content) || longCommand($0.title) }
+        }
+        state.bindings = Array(state.bindings.prefix(Self.maxImportedItems))
+        state.folders = Array(state.folders.prefix(Self.maxImportedItems))
+        for folder in state.folders.indices {
+            state.folders[folder].items =
+                Array(state.folders[folder].items.prefix(Self.maxImportedItems))
+        }
+
         if state.items.count > Self.maxImportedItems {
             let dropped = state.items.count - Self.maxImportedItems
             state.items = Array(state.items.prefix(Self.maxImportedItems))

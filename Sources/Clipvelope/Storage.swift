@@ -1,8 +1,21 @@
 import Foundation
 import CryptoKit
 
-enum StorageError: Error {
+enum StorageError: LocalizedError {
     case sealFailed
+    /// A vault sealed by a build from before files carried their role.
+    case preReleaseVault
+
+    var errorDescription: String? {
+        switch self {
+        case .sealFailed:
+            return "The vault could not be encrypted."
+        case .preReleaseVault:
+            return "This vault was written by a pre-release version of Clipvelope and "
+                + "cannot be opened by this one. Choose Start Fresh to begin a new vault; "
+                + "the old one is kept alongside it and is not deleted."
+        }
+    }
 }
 
 /// Lets tests supply a fixed key instead of reaching for the login Keychain,
@@ -33,11 +46,6 @@ final class EncryptedStorage {
     enum LoadOutcome {
         case fresh
         case loaded(AppState)
-        /// Decrypted fine, could not be written back. The history is intact and
-        /// is shown; only saving pauses. Kept apart from `unreadable` because
-        /// the remedy for that one moves the vault aside, which against a
-        /// perfectly readable vault destroys it.
-        case loadedButUnwritable(AppState, Error)
         case unreadable(Error)
     }
 
@@ -77,82 +85,33 @@ final class EncryptedStorage {
             do {
                 return .loaded(try decodeState(try readSealed(at: indexURL, role: Self.indexRole)))
             } catch {
-                // A vault written before files were bound to their role opens
-                // only without one. It is rewritten bound, once, and after that
-                // the app never produces an unbound file again.
-                if let unbound = try? readSealed(at: indexURL, role: nil),
-                   let state = try? decodeState(unbound) {
-                    return bindUnboundVault(state)
-                }
-                return .unreadable(error)
+                return isPreRelease(indexURL) ? .unreadable(StorageError.preReleaseVault)
+                                              : .unreadable(error)
             }
         }
+        // The pre-schema-4 blob predates roles by definition, so its mere
+        // existence is the answer; there is nothing to probe.
         if FileManager.default.fileExists(atPath: legacyBlobURL.path) {
-            return migrateLegacyBlob()
+            return .unreadable(StorageError.preReleaseVault)
         }
         return .fresh
     }
 
-    /// Reads the pre-schema-4 single blob and rewrites it as an index.
+    /// Whether a file opens under the vault key with no role, which is what a
+    /// build from before 1.0 wrote.
     ///
-    /// The original is moved aside rather than deleted, and only after the new
-    /// index is on disk, so a failure part-way through cannot lose history.
-    private func migrateLegacyBlob() -> LoadOutcome {
-        let state: AppState
-        do {
-            state = try decodeState(try readSealed(at: legacyBlobURL, role: nil))
-        } catch {
-            return .unreadable(error)
-        }
-        do {
-            try saveIndex(state)
-        } catch {
-            return .loadedButUnwritable(state, error)
-        }
-        archiveMigratedBlob()
-        return .loaded(state)
-    }
-
-    /// Keeps the migrated original, so a failure part-way cannot lose history,
-    /// but re-seals it under its own role first.
-    ///
-    /// Left as it was it is a valid *unbound* index, and the upgrade path below
-    /// accepts one of those: anyone who can write this directory could rename it
-    /// back over `index.cvi` and roll the vault to its pre-1.0 state, which is
-    /// applied with none of the filtering an import gets.
-    private func archiveMigratedBlob() {
-        let archive = directory.appendingPathComponent("clipboard.db.migrated")
-        if let plaintext = try? readSealed(at: legacyBlobURL, role: nil),
-           (try? writeSealed(plaintext, to: archive, role: Self.archiveRole)) != nil {
-            try? FileManager.default.removeItem(at: legacyBlobURL)
-            return
-        }
-        try? FileManager.default.moveItem(at: legacyBlobURL, to: archive)
-    }
-
-    /// Re-seals a pre-1.0 vault with each file bound to its role. Payloads
-    /// first, index last, so a crash part-way leaves an unbound index that
-    /// simply repeats the migration; a payload that is already bound (or gone)
-    /// is skipped.
-    private func bindUnboundVault(_ state: AppState) -> LoadOutcome {
-        for item in state.items where item.hasPayloadFile {
-            let url = payloadURL(for: item.id)
-            guard let data = try? readSealed(at: url, role: nil) else { continue }
-            do {
-                try writeSealed(data, to: url, role: Self.payloadRole(for: item.id))
-            } catch {
-                // Stop before the index. Leaving it unbound means the next launch
-                // repeats the upgrade; writing it now would strand this payload,
-                // which would then only ever read as missing.
-                return .loadedButUnwritable(state, error)
-            }
-        }
-        do {
-            try saveIndex(state)
-            return .loaded(state)
-        } catch {
-            return .loadedButUnwritable(state, error)
-        }
+    /// It is recognised only so the app can say precisely what is wrong. The
+    /// plaintext is deliberately **never decoded or applied**, and this is the
+    /// single most important line in the file. Those builds sealed clipboard
+    /// payloads with no role either, and a payload's plaintext is chosen by
+    /// whoever writes the pasteboard: rich-text capture stores `public.html`
+    /// bytes verbatim, so any process could have had bytes of its choosing
+    /// sealed under this key. Parsing an unbound file here would let one of
+    /// those be copied over `index.cvi` and applied as vault state through the
+    /// load path, which does no disarming at all -- arming shell Quick Slots
+    /// and switching password-skipping off, permanently.
+    private func isPreRelease(_ url: URL) -> Bool {
+        (try? readSealed(at: url, role: nil)) != nil
     }
 
     private func decodeState(_ data: Data) throws -> AppState {
@@ -238,8 +197,6 @@ final class EncryptedStorage {
         Data("clipvelope/payload/v1/\(id.uuidString)".utf8)
     }
 
-    /// The retired pre-schema-4 blob, kept only as a recovery copy.
-    static let archiveRole = Data("clipvelope/archive/v1".utf8)
 
     private func writeSealed(_ plaintext: Data, to url: URL, role: Data) throws {
         let sealed = try AES.GCM.seal(plaintext, using: try keyStore.getOrCreateKey(),
@@ -248,8 +205,8 @@ final class EncryptedStorage {
         try combined.write(to: url, options: [.atomic])
     }
 
-    /// `role: nil` opens a file written before roles existed. Only the two
-    /// one-time migrations may pass it.
+    /// `role: nil` opens a file written before roles existed. Only
+    /// `isPreRelease` passes it, and it discards the plaintext.
     private func readSealed(at url: URL, role: Data?) throws -> Data {
         let box = try AES.GCM.SealedBox(combined: try Data(contentsOf: url))
         let key = try keyStore.getOrCreateKey()

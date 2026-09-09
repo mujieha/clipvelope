@@ -29,10 +29,11 @@ First release.
   switch automatic backups on or off, change their mode, rebind shortcuts, or
   add file rows, which would otherwise hand a paste target any file whose path
   the backup's author guessed.
-- A vault that reads but cannot be written back, because the disk is full or
-  its folder is read-only, now says so and keeps your history on screen. It is
-  no longer reported as undecryptable, which offered a repair that moves the
-  vault aside.
+- A vault written by a pre-release build is refused, and the app says exactly
+  that instead of blaming the Keychain. It is not upgraded in place: those
+  builds sealed each stored entry without binding it to its purpose, and any
+  program could choose what got sealed by writing the pasteboard, so a vault of
+  that vintage cannot be told apart from one an attacker assembled.
 - Imported backups are held to the limits capture enforces: an entry whose
   stored bytes do not match what it claims is left out, and so are oversized
   entries and anything past a thousand of them.
