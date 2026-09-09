@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import CryptoKit
+import zlib
 @testable import Clipvelope
 
 /// The core loop of the product, both directions, on a private pasteboard so
@@ -8,6 +9,37 @@ import CryptoKit
 private struct TestKeyStore: KeyProviding {
     let key = SymmetricKey(data: Data(repeating: 7, count: 32))
     func getOrCreateKey() throws -> SymmetricKey { key }
+}
+
+/// A real, valid PNG: `width` x `height` grayscale black. Solid colour deflates
+/// at roughly a thousand to one, so a file well under a megabyte can declare
+/// far more pixels than the decoder should ever be asked to allocate.
+private func compressiblePNG(width: Int, height: Int) -> Data {
+    func be(_ v: UInt32) -> [UInt8] { withUnsafeBytes(of: v.bigEndian, Array.init) }
+    func chunk(_ type: String, _ body: Data) -> Data {
+        let typeBytes = Data(type.utf8)
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in typeBytes + body {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 { crc = (crc >> 1) ^ (crc & 1 == 1 ? 0xEDB8_8320 : 0) }
+        }
+        return Data(be(UInt32(body.count))) + typeBytes + body + Data(be(crc ^ 0xFFFF_FFFF))
+    }
+    // One filter byte per row, then the samples; all zero.
+    let raw = Data(count: (width + 1) * height)
+    var destinationLength = compressBound(uLong(raw.count))
+    var compressed = Data(count: Int(destinationLength))
+    let status = raw.withUnsafeBytes { source in
+        compressed.withUnsafeMutableBytes { destination in
+            compress2(destination.bindMemory(to: Bytef.self).baseAddress, &destinationLength,
+                      source.bindMemory(to: Bytef.self).baseAddress, uLong(raw.count), Z_BEST_SPEED)
+        }
+    }
+    precondition(status == Z_OK)
+    compressed.count = Int(destinationLength)
+
+    let ihdr = Data(be(UInt32(width)) + be(UInt32(height)) + [8, 0, 0, 0, 0])
+    return Data(ClipboardMonitor.pngSignature) + chunk("IHDR", ihdr) + chunk("IDAT", compressed) + chunk("IEND", Data())
 }
 
 private func pngData(width: Int, height: Int) -> Data {
@@ -81,6 +113,49 @@ final class CaptureReadingTests: XCTestCase {
         pb.setString("plain", forType: .string)
         guard case .text(let s)? = ClipboardMonitor.readPayload(from: pb) else { return XCTFail() }
         XCTAssertEqual(s, "plain")
+    }
+
+    /// The plain rendering of a rich paste lives inline in the index, like plain
+    /// text does, so it gets the same cap; otherwise a small RTF could carry an
+    /// unbounded string past the plain-text limit.
+    func testRichTextWithAnOversizedPlainRenderingIsSkipped() {
+        let huge = String(repeating: "x", count: ClipboardMonitor.maxTextBytes + 1)
+        pb.setString(huge, forType: .string)
+        pb.setData(Data("{\\rtf1 small}".utf8), forType: .rtf)
+        XCTAssertNil(ClipboardMonitor.readPayload(from: pb))
+    }
+
+    /// A valid PNG well under a megabyte that declares 81 million pixels. Decoding it
+    /// would allocate the whole raster, so the declared size is checked first,
+    /// on both the PNG and the TIFF path (ImageIO sniffs the real format).
+    func testAnImageDeclaringMorePixelsThanTheCeilingIsSkippedWithoutDecoding() {
+        let hostile = compressiblePNG(width: 9000, height: 9000)
+        XCTAssertLessThan(hostile.count, 1_000_000, "the point is that the file is small")
+        XCTAssertEqual(ClipboardMonitor.declaredPixelSize(of: hostile).map { [$0.0, $0.1] },
+                       [9000, 9000], "the fixture must be a readable PNG")
+        XCTAssertGreaterThan(9000 * 9000, ClipboardMonitor.maxImagePixels)
+
+        pb.setData(hostile, forType: .png)
+        XCTAssertNil(ClipboardMonitor.readPayload(from: pb))
+
+        pb.clearContents()
+        pb.setData(hostile, forType: .tiff)
+        XCTAssertNil(ClipboardMonitor.readPayload(from: pb))
+    }
+
+    /// The same construction at a sane size still captures, so the ceiling is
+    /// the only thing the previous test exercises.
+    func testACompressibleImageUnderTheCeilingIsCaptured() {
+        pb.setData(compressiblePNG(width: 300, height: 200), forType: .png)
+        guard case .image(_, _, let w, let h)? = ClipboardMonitor.readPayload(from: pb) else { return XCTFail() }
+        XCTAssertEqual([w, h], [300, 200])
+    }
+
+    func testTheImageCeilingAdmitsScreensAndRefusesTheAbsurd() {
+        XCTAssertTrue(ClipboardMonitor.acceptsImage(pixelWidth: 6016, pixelHeight: 3384), "a 6K display")
+        XCTAssertFalse(ClipboardMonitor.acceptsImage(pixelWidth: 50_000, pixelHeight: 50_000))
+        XCTAssertFalse(ClipboardMonitor.acceptsImage(pixelWidth: 0, pixelHeight: 10))
+        XCTAssertFalse(ClipboardMonitor.acceptsImage(pixelWidth: .max, pixelHeight: 2), "overflow")
     }
 
     func testPNGIsAnImageWithItsDimensions() {

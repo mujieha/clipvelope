@@ -176,12 +176,36 @@ final class ImportHardeningTests: XCTestCase {
         XCTAssertThrowsError(try BackupCodec.open(file, password: "pw"))
     }
 
-    func testLegacyFilesAreRecognisedAsSuch() throws {
-        let modern = try BackupCodec.seal(Data("{}".utf8), keychainKey: FixedKeyStore().key)
-        XCTAssertFalse(BackupCodec.isLegacyFormat(modern))
+    // MARK: - Duplicate ids
 
-        let legacy = try XCTUnwrap(AES.GCM.seal(Data("{}".utf8),
-                                                using: FixedKeyStore().key).combined)
-        XCTAssertTrue(BackupCodec.isLegacyFormat(legacy))
+    /// The panel indexes rows by id with an initializer that traps on a
+    /// duplicate. A backup is a file, and a file can say anything.
+    func testABackupWithDuplicateItemIDsImportsWithoutDuplicates() throws {
+        let store = makeStore()
+        let id = UUID()
+        var state = AppState.empty
+        state.items = [
+            ClipboardItem(id: id, createdAt: Date(), isPinned: false, content: .text("first"), sourceBundleID: nil),
+            ClipboardItem(id: id, createdAt: Date(), isPinned: false, content: .text("second"), sourceBundleID: nil),
+            ClipboardItem(id: UUID(), createdAt: Date(), isPinned: false, content: .text("third"), sourceBundleID: nil),
+        ]
+        let url = root.appendingPathComponent("dupes.cvb")
+        try writeBackup(state, to: url, password: nil)
+
+        store.importBackup(from: url, password: nil)
+        settle(store)
+
+        XCTAssertEqual(store.items.map(\.searchText), ["first", "third"])
+        XCTAssertEqual(Set(store.items.map(\.id)).count, store.items.count)
+    }
+
+    func testRemovingDuplicateIDsKeepsTheFirstOccurrence() {
+        let id = UUID()
+        let items = [
+            ClipboardItem(id: id, createdAt: Date(), isPinned: false, content: .text("a"), sourceBundleID: nil),
+            ClipboardItem(id: id, createdAt: Date(), isPinned: true, content: .text("b"), sourceBundleID: nil),
+        ]
+        XCTAssertEqual(items.removingDuplicateIDs().map(\.searchText), ["a"])
+        XCTAssertEqual([ClipboardItem]().removingDuplicateIDs(), [])
     }
 }

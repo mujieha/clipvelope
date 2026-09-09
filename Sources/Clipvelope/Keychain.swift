@@ -30,6 +30,7 @@ final class KeychainKeyStore {
     private let service = "com.mujieha.Clipvelope"
     private let account = "clipboard-key"
     private let autoBackupPasswordAccount = "auto-backup-password"
+    private let remoteControlTokenAccount = "remote-control-token"
 
     /// Probed once, with a write.
     ///
@@ -120,6 +121,20 @@ final class KeychainKeyStore {
             NSLog("Clipvelope: could not save the auto-backup password: \(error)")
             return error
         }
+    }
+
+    // MARK: - Remote-control token
+
+    /// See RemoteControl. Overwritten on every launch, so it never outlives the
+    /// instance it authenticates by more than one restart.
+    func saveRemoteControlToken(_ token: Data) throws {
+        try write(token, account: remoteControlTokenAccount,
+                  dataProtection: Self.usesDataProtectionKeychain)
+    }
+
+    func loadRemoteControlToken() -> Data? {
+        try? read(account: remoteControlTokenAccount,
+                  dataProtection: Self.usesDataProtectionKeychain)
     }
 
     // MARK: - Primitives

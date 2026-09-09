@@ -18,3 +18,14 @@ First release.
 - Encrypted backups, device-bound or portable with a password, and an automatic
   backup after every change.
 - Refuses to overwrite a vault it cannot read, and says so.
+- Every encrypted file is bound to its role, the index or one specific item's
+  payload, so a file written for one purpose cannot be passed off as another.
+  Vaults from pre-release builds are rebound on first launch; their headerless
+  backups are no longer readable and should be exported again.
+- `Clipvelope --open` and `--preferences` act only on requests carrying a token
+  held in the app's own Keychain item, so no other process can pop the history
+  open.
+- Hostile input is refused before it costs anything: a backup may demand at most
+  ten million key-derivation rounds, an image is checked against its declared
+  pixel count before decoding, and formatted text with an oversized plain
+  rendering is skipped like oversized plain text.

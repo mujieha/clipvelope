@@ -64,14 +64,21 @@ final class EncryptedStorage {
     func saveIndex(_ state: AppState) throws {
         var state = state
         state.schemaVersion = AppState.currentSchemaVersion
-        try writeSealed(try JSONEncoder().encode(state), to: indexURL)
+        try writeSealed(try JSONEncoder().encode(state), to: indexURL, role: Self.indexRole)
     }
 
     func load() -> LoadOutcome {
         if FileManager.default.fileExists(atPath: indexURL.path) {
             do {
-                return .loaded(try decodeState(try readSealed(at: indexURL)))
+                return .loaded(try decodeState(try readSealed(at: indexURL, role: Self.indexRole)))
             } catch {
+                // A vault written before files were bound to their role opens
+                // only without one. It is rewritten bound, once, and after that
+                // the app never produces an unbound file again.
+                if let unbound = try? readSealed(at: indexURL, role: nil),
+                   let state = try? decodeState(unbound) {
+                    return bindUnboundVault(state)
+                }
                 return .unreadable(error)
             }
         }
@@ -87,12 +94,34 @@ final class EncryptedStorage {
     /// index is on disk, so a failure part-way through cannot lose history.
     private func migrateLegacyBlob() -> LoadOutcome {
         do {
-            let state = try decodeState(try readSealed(at: legacyBlobURL))
+            let state = try decodeState(try readSealed(at: legacyBlobURL, role: nil))
             try saveIndex(state)
             try? FileManager.default.moveItem(
                 at: legacyBlobURL,
                 to: directory.appendingPathComponent("clipboard.db.migrated")
             )
+            return .loaded(state)
+        } catch {
+            return .unreadable(error)
+        }
+    }
+
+    /// Re-seals a pre-1.0 vault with each file bound to its role. Payloads
+    /// first, index last, so a crash part-way leaves an unbound index that
+    /// simply repeats the migration; a payload that is already bound (or gone)
+    /// is skipped.
+    private func bindUnboundVault(_ state: AppState) -> LoadOutcome {
+        for item in state.items where item.hasPayloadFile {
+            let url = payloadURL(for: item.id)
+            guard let data = try? readSealed(at: url, role: nil) else { continue }
+            do {
+                try writeSealed(data, to: url, role: Self.payloadRole(for: item.id))
+            } catch {
+                return .unreadable(error)
+            }
+        }
+        do {
+            try saveIndex(state)
             return .loaded(state)
         } catch {
             return .unreadable(error)
@@ -135,11 +164,11 @@ final class EncryptedStorage {
 
     func writePayload(_ data: Data, for id: UUID) throws {
         try FileManager.default.createDirectory(at: payloadsDirectory, withIntermediateDirectories: true)
-        try writeSealed(data, to: payloadURL(for: id))
+        try writeSealed(data, to: payloadURL(for: id), role: Self.payloadRole(for: id))
     }
 
     func readPayload(for id: UUID) throws -> Data {
-        try readSealed(at: payloadURL(for: id))
+        try readSealed(at: payloadURL(for: id), role: Self.payloadRole(for: id))
     }
 
     func deletePayload(for id: UUID) {
@@ -170,14 +199,33 @@ final class EncryptedStorage {
 
     // MARK: - Sealing
 
-    private func writeSealed(_ plaintext: Data, to url: URL) throws {
-        let sealed = try AES.GCM.seal(plaintext, using: try keyStore.getOrCreateKey())
+    /// Every file is sealed under the one key, so the key alone cannot tell an
+    /// index from a payload: without more, a payload copied over `index.cvi`
+    /// would load as state, and `index.cvi` copied over a payload would be
+    /// decrypted and put on the pasteboard as if it were an image. The role is
+    /// authenticated as GCM associated data, so a box opens only in the role it
+    /// was written for -- and a payload only as the payload of its own item.
+    static let indexRole = Data("clipvelope/index/v1".utf8)
+
+    static func payloadRole(for id: UUID) -> Data {
+        Data("clipvelope/payload/v1/\(id.uuidString)".utf8)
+    }
+
+    private func writeSealed(_ plaintext: Data, to url: URL, role: Data) throws {
+        let sealed = try AES.GCM.seal(plaintext, using: try keyStore.getOrCreateKey(),
+                                      authenticating: role)
         guard let combined = sealed.combined else { throw StorageError.sealFailed }
         try combined.write(to: url, options: [.atomic])
     }
 
-    private func readSealed(at url: URL) throws -> Data {
+    /// `role: nil` opens a file written before roles existed. Only the two
+    /// one-time migrations may pass it.
+    private func readSealed(at url: URL, role: Data?) throws -> Data {
         let box = try AES.GCM.SealedBox(combined: try Data(contentsOf: url))
-        return try AES.GCM.open(box, using: try keyStore.getOrCreateKey())
+        let key = try keyStore.getOrCreateKey()
+        if let role {
+            return try AES.GCM.open(box, using: key, authenticating: role)
+        }
+        return try AES.GCM.open(box, using: key)
     }
 }

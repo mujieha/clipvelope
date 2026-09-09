@@ -77,25 +77,46 @@ final class BackupCodecTests: XCTestCase {
         XCTAssertNotEqual(a, b)
     }
 
-    // MARK: - Legacy files must still open
+    // MARK: - Headerless files are refused
 
-    func testLegacyKeychainFileWithNoHeaderStillOpens() throws {
-        // Original format: the file was just the sealed box.
-        let legacy = try XCTUnwrap(AES.GCM.seal(plaintext, using: key).combined)
-        XCTAssertEqual(try BackupCodec.open(legacy, keychainKey: key), plaintext)
+    /// A headerless "keychain backup" is byte-for-byte a vault file sealed with
+    /// no role. Accepting it would let a payload -- whose bytes any app can
+    /// choose by copying them -- pass as a device-bound backup.
+    func testAHeaderlessFileIsRefusedInKeychainMode() throws {
+        let headerless = try XCTUnwrap(AES.GCM.seal(plaintext, using: key).combined)
+        XCTAssertThrowsError(try BackupCodec.open(headerless, keychainKey: key)) { error in
+            XCTAssertEqual(error as? BackupCodec.CodecError, .malformed)
+        }
     }
 
-    func testLegacyPasswordFileWithTheOldWeakDerivationStillOpens() throws {
-        // Original format: salt || sealed box, key = SHA256(salt || password).
-        let salt = Data(repeating: 3, count: 16)
-        var seed = Data()
-        seed.append(salt)
-        seed.append(Data("hunter2".utf8))
-        let legacyKey = SymmetricKey(data: Data(SHA256.hash(data: seed)))
+    func testAHeaderlessFileIsRefusedInPasswordMode() throws {
+        var headerless = Data(repeating: 3, count: 16)
+        headerless.append(try XCTUnwrap(AES.GCM.seal(plaintext, using: key).combined))
+        XCTAssertThrowsError(try BackupCodec.open(headerless, password: "hunter2")) { error in
+            XCTAssertEqual(error as? BackupCodec.CodecError, .malformed)
+        }
+    }
 
-        var legacy = salt
-        legacy.append(try XCTUnwrap(AES.GCM.seal(plaintext, using: legacyKey).combined))
+    // MARK: - The file does not get to choose the derivation cost
 
-        XCTAssertEqual(try BackupCodec.open(legacy, password: "hunter2"), plaintext)
+    func testABackupDemandingTooManyRoundsIsRefusedBeforeDeriving() throws {
+        // Written cheaply, then the header's iteration count is overwritten with
+        // the maximum -- which is what a hostile file is: a header that says
+        // whatever it likes. The check has to fire before the KDF runs.
+        var file = try BackupCodec.seal(plaintext, password: "pw", iterations: fastIterations)
+        let iterationOffset = BackupCodec.magic.count + 1 + 1
+        file.replaceSubrange(iterationOffset..<iterationOffset + 4, with: [0xFF, 0xFF, 0xFF, 0xFF])
+
+        let started = Date()
+        XCTAssertThrowsError(try BackupCodec.open(file, password: "pw")) { error in
+            XCTAssertEqual(error as? BackupCodec.CodecError, .excessiveKDF(.max))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1,
+                          "the refusal must come from the header, not from running the KDF")
+    }
+
+    func testTheCeilingIsWellAboveTheDefault() {
+        XCTAssertGreaterThanOrEqual(BackupCodec.maximumIterations, BackupCodec.defaultIterations * 4,
+                                    "the default must be able to rise without stranding files")
     }
 }

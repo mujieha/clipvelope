@@ -9,16 +9,14 @@ import ServiceManagement
 /// where it lives -- Launch at Login registration and Keychain access both do --
 /// and none of that is visible from the outside.
 enum Diagnostics {
-    /// Posted by `Clipvelope --open` and observed by the running instance, so a
-    /// launcher or a script can bring up the history without Accessibility access.
-    static let openNotification = Notification.Name("com.mujieha.Clipvelope.open")
-    /// Posted by `Clipvelope --preferences`.
-    static let preferencesNotification = Notification.Name("com.mujieha.Clipvelope.preferences")
-
     static func runIfRequested() {
-        if CommandLine.arguments.contains("--open") { signalRunningInstance(openNotification) }
+        // `--open` and `--preferences` let a launcher or a script bring up the
+        // history without Accessibility access. See RemoteControl.
+        if CommandLine.arguments.contains("--open") {
+            signalRunningInstance(RemoteControl.openNotification)
+        }
         if CommandLine.arguments.contains("--preferences") {
-            signalRunningInstance(preferencesNotification)
+            signalRunningInstance(RemoteControl.preferencesNotification)
         }
         guard CommandLine.arguments.contains("--status") else { return }
 
@@ -52,8 +50,10 @@ enum Diagnostics {
             print("Clipvelope is not running.")
             exit(1)
         }
-        DistributedNotificationCenter.default().postNotificationName(
-            name, object: nil, userInfo: nil, deliverImmediately: true)
+        guard RemoteControl.send(name) else {
+            print("Clipvelope is running, but its remote-control token could not be read from the Keychain.")
+            exit(1)
+        }
         exit(0)
     }
 

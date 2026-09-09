@@ -51,6 +51,11 @@ enum ClipboardContent: Codable, Equatable {
         /// Images larger than this are skipped rather than stored. Even with
         /// per-item files, an unbounded payload is a way to fill someone's disk.
         static let maxBytes = 32 * 1024 * 1024
+        /// Decoded pixels, checked against the *declared* size before anything
+        /// is decoded. A sub-megabyte compressed file can declare 50000x50000
+        /// and the decoder would allocate the 10 GB raster on its word. 64 MP is
+        /// three times a 6K display.
+        static let maxPixels = 64_000_000
 
         var pixelWidth: Int
         var pixelHeight: Int
@@ -127,6 +132,15 @@ struct ClipboardItem: Codable, Identifiable, Equatable {
     }
 
     var hasPayloadFile: Bool { payloadByteCount > 0 }
+}
+
+extension Array where Element == ClipboardItem {
+    /// Keeps the first item with each id. Views index rows by id, and the ids
+    /// come out of a file, so they are unique only if something makes them so.
+    func removingDuplicateIDs() -> [ClipboardItem] {
+        var seen = Set<UUID>()
+        return filter { seen.insert($0.id).inserted }
+    }
 }
 
 extension ClipboardItem {

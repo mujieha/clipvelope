@@ -210,7 +210,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func apply(_ state: AppState) {
-        items = state.items
+        items = state.items.removingDuplicateIDs()
         bindings = state.bindings
         folders = state.folders
         autoBackupEnabled = state.autoBackupEnabled
@@ -433,10 +433,14 @@ final class ClipboardStore: ObservableObject {
             // The payload is a file now, so reading it is I/O.
             ioQueue.async { [weak self] in
                 guard let self else { return }
-                guard let data = try? storage.readPayload(for: item.id) else {
+                // The role binding already guarantees these bytes were written as
+                // this item's payload; checking the signature as well means nothing
+                // that is not a PNG is ever offered to other apps as one.
+                guard let data = try? storage.readPayload(for: item.id),
+                      data.starts(with: ClipboardMonitor.pngSignature) else {
                     // A row that looks like an image but cannot produce one is
                     // worse than no row: take it out and say why.
-                    NSLog("Clipvelope: payload missing for \(item.id)")
+                    NSLog("Clipvelope: payload missing or not a PNG for \(item.id)")
                     DispatchQueue.main.async {
                         self.remove(item)
                         self.showNotice("That image's file was missing, so the entry was removed.")
@@ -675,9 +679,12 @@ final class ClipboardStore: ObservableObject {
     /// How far a backup is trusted.
     ///
     /// A keychain-mode backup can only have been produced by something holding
-    /// this Mac's Keychain key, which in practice means the user. A password
-    /// backup is portable by design and can come from anyone, so everything in
-    /// it is untrusted input.
+    /// this Mac's Keychain key, which in practice means the user. That holds
+    /// because every box the app seals under that key is bound to its role:
+    /// a vault payload -- whose plaintext any app can choose by putting it on
+    /// the pasteboard -- cannot be presented as a backup. A password backup is
+    /// portable by design and can come from anyone, so everything in it is
+    /// untrusted input.
     private enum BackupTrust {
         case deviceBound
         case portable
@@ -737,7 +744,6 @@ final class ClipboardStore: ObservableObject {
                 decrypted = try BackupCodec.open(data, keychainKey: try storage.keyStore.getOrCreateKey())
             }
             let trust: BackupTrust = password == nil ? .deviceBound : .portable
-            let wasLegacy = BackupCodec.isLegacyFormat(data)
             let snapshot = try Self.decodeSnapshot(decrypted)
             for (key, data) in snapshot.payloads {
                 guard let id = UUID(uuidString: key) else { continue }
@@ -752,12 +758,6 @@ final class ClipboardStore: ObservableObject {
                     state = imported
                 case .portable:
                     (state, notes) = self.disarming(imported)
-                }
-                // Only the password variant of the old format was weak; a legacy
-                // keychain backup used the full 256-bit key.
-                if wasLegacy && password != nil {
-                    notes.append("This backup used the old format, whose password "
-                                 + "protection is weak. Export it again to upgrade it.")
                 }
 
                 if self.writesSuspended {

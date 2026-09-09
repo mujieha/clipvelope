@@ -31,6 +31,12 @@ released, and you will be credited in the changelog unless you prefer not to be.
 - Nothing is sent anywhere. A release build contacts the update feed once a day
   and sends nothing about the user or the clipboard.
 - A vault that cannot be decrypted is never overwritten.
+- Every encrypted file is bound to its role, the index or the payload of one
+  specific item, so a file the app wrote for one purpose cannot be presented
+  to it as another, and a backup must carry its header.
+- `Clipvelope --open` and `--preferences` act only on requests that carry the
+  token this launch stored in the app's Keychain item; a bare notification on
+  the same name is ignored.
 - Portable backups disable the shell flag on every imported command and cannot
   weaken privacy settings.
 

@@ -71,7 +71,8 @@ struct StatusItemLabel: View {
             }
         }
             .onReceive(DistributedNotificationCenter.default()
-                .publisher(for: Diagnostics.preferencesNotification)) { _ in
+                .publisher(for: RemoteControl.preferencesNotification)
+                .filter { RemoteControl.isAuthentic($0) }) { _ in
                 openSettings()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     bringSettingsWindowForward()
@@ -541,7 +542,10 @@ struct ClipboardMenuView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 40)
         } else {
-            let position = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($1.id, $0) })
+            // Ids come off disk and out of backups. `uniqueKeysWithValues:` traps
+            // on a duplicate, which would crash the panel on every open.
+            let position = Dictionary(items.enumerated().map { ($1.id, $0) },
+                                      uniquingKeysWith: { first, _ in first })
             ForEach(groups, id: \.section) { group in
                 SectionLabel(title: group.section.title)
                 ForEach(group.items) { item in

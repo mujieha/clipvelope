@@ -6,18 +6,23 @@ import CommonCrypto
 
 /// Reads and writes `.cvb` backup files.
 ///
-/// Two things were wrong with the original format. It had no header, so the
-/// layout could never change without breaking existing files; and password
-/// backups derived their key with a single unsalted-iteration SHA-256, which a
-/// GPU can brute-force at enormous rates. Both are fixed here, and both legacy
-/// layouts are still readable so existing backups are not stranded.
+/// Every file starts with the `CVB1` header, which is authenticated as GCM
+/// associated data, so neither the mode byte nor the KDF parameters can be
+/// edited without invalidating the ciphertext. A file without the header is
+/// refused: pre-release builds wrote headerless files, and a headerless
+/// keychain backup is byte-for-byte the same thing as a vault file, which is
+/// exactly the confusion the header exists to prevent.
 enum BackupCodec {
     static let magic = Data("CVB1".utf8)
     static let defaultIterations: UInt32 = 600_000
     /// Files carry their own iteration count so the cost can be raised later.
     /// That number is attacker-controlled for a file the user did not write, so
-    /// it needs a floor: a backup claiming 1 iteration must not be honoured.
+    /// it is bounded both ways: a backup claiming 1 round must not be honoured,
+    /// and one claiming four billion must not be allowed to peg a core for
+    /// hours -- on the vault's serial I/O queue -- before its password is even
+    /// checked.
     static let minimumIterations: UInt32 = 100_000
+    static let maximumIterations: UInt32 = 10_000_000
     private static let saltLength = 16
     private static let pbkdf2SHA256: UInt8 = 1
 
@@ -31,6 +36,7 @@ enum BackupCodec {
         case unsupportedKDF(UInt8)
         case wrongMode
         case weakKDF(UInt32)
+        case excessiveKDF(UInt32)
 
         var errorDescription: String? {
             switch self {
@@ -40,6 +46,9 @@ enum BackupCodec {
             case .weakKDF(let rounds):
                 return "This backup asks for only \(rounds) key-derivation rounds, "
                     + "far below the \(minimumIterations) required. Refusing to open it."
+            case .excessiveKDF(let rounds):
+                return "This backup asks for \(rounds) key-derivation rounds, "
+                    + "above the \(maximumIterations) this app will perform. Refusing to open it."
             }
         }
     }
@@ -61,14 +70,6 @@ enum BackupCodec {
         }
         guard status == kCCSuccess else { throw CodecError.malformed }
         return SymmetricKey(data: derived)
-    }
-
-    /// The original scheme, kept only so old backups can still be opened.
-    private static func legacyDeriveKey(password: String, salt: Data) -> SymmetricKey {
-        var data = Data()
-        data.append(salt)
-        data.append(Data(password.utf8))
-        return SymmetricKey(data: Data(SHA256.hash(data: data)))
     }
 
     // MARK: Writing
@@ -107,32 +108,15 @@ enum BackupCodec {
 
     // MARK: Reading
 
-    /// True for a backup written before the CVB1 header existed. Those used a
-    /// single unsalted-iteration SHA-256 to derive the password key, so a file
-    /// that opens this way is far weaker than the user is likely to assume.
-    static func isLegacyFormat(_ file: Data) -> Bool {
-        header(of: file) == nil
-    }
-
     static func open(_ file: Data, keychainKey: SymmetricKey) throws -> Data {
-        guard let (mode, body) = header(of: file) else {
-            // Legacy keychain export: the whole file is the sealed box.
-            return try decrypt(file, using: keychainKey, authenticating: nil)
-        }
+        guard let (mode, body) = header(of: file) else { throw CodecError.malformed }
         guard mode == .keychain else { throw CodecError.wrongMode }
         return try decrypt(body, using: keychainKey,
                            authenticating: Data(file.prefix(magic.count + 1)))
     }
 
     static func open(_ file: Data, password: String) throws -> Data {
-        guard let (mode, body) = header(of: file) else {
-            // Legacy password export: salt || sealed box, weak SHA-256 derivation.
-            guard file.count > saltLength else { throw CodecError.malformed }
-            let salt = Data(file.prefix(saltLength))
-            let key = legacyDeriveKey(password: password, salt: salt)
-            return try decrypt(Data(file.dropFirst(saltLength)), using: key,
-                               authenticating: nil)
-        }
+        guard let (mode, body) = header(of: file) else { throw CodecError.malformed }
         guard mode == .password else { throw CodecError.wrongMode }
         guard body.count > 1 + 4 + saltLength else { throw CodecError.malformed }
 
@@ -146,6 +130,7 @@ enum BackupCodec {
         let ciphertext = Data(rest.dropFirst(saltLength))
 
         guard iterations >= minimumIterations else { throw CodecError.weakKDF(iterations) }
+        guard iterations <= maximumIterations else { throw CodecError.excessiveKDF(iterations) }
 
         let key = try deriveKey(password: password, salt: salt, iterations: iterations)
         let headerLength = magic.count + 1 + 1 + 4 + saltLength
@@ -163,11 +148,8 @@ enum BackupCodec {
 
     private static func decrypt(_ ciphertext: Data,
                                 using key: SymmetricKey,
-                                authenticating header: Data?) throws -> Data {
+                                authenticating header: Data) throws -> Data {
         let box = try AES.GCM.SealedBox(combined: ciphertext)
-        if let header {
-            return try AES.GCM.open(box, using: key, authenticating: header)
-        }
-        return try AES.GCM.open(box, using: key)
+        return try AES.GCM.open(box, using: key, authenticating: header)
     }
 }

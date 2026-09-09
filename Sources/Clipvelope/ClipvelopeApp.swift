@@ -20,9 +20,16 @@ struct ClipvelopeApp: App {
 
     init() {
         GlobalHotkeyCenter.shared.onOpen = { PanelOpener.toggle() }
+        RemoteControl.arm()
         DistributedNotificationCenter.default().addObserver(
-            forName: Diagnostics.openNotification, object: nil, queue: .main
-        ) { _ in PanelOpener.open() }
+            forName: RemoteControl.openNotification, object: nil, queue: .main
+        ) { notification in
+            guard RemoteControl.isAuthentic(notification) else {
+                NSLog("Clipvelope: ignored an --open request that did not carry this launch's token")
+                return
+            }
+            PanelOpener.open()
+        }
     }
 
     var body: some Scene {

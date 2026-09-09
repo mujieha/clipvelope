@@ -66,6 +66,7 @@ The app appears in the menu bar as **Clipvelope**.
 - "Clear" asks for confirmation, then deletes the encrypted vault and any auto-backup file.
 - `Clipvelope --open` opens the history and `Clipvelope --preferences` opens Preferences, from a
   script or a launcher such as Raycast, Alfred or Karabiner, without needing Accessibility access.
+  Only the app's own binary can send these requests; other processes are ignored.
   **Command + ,** opens Preferences while the history is open; that one is changeable too.
 
 ## Preferences

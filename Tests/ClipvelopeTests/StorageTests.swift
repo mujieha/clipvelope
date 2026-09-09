@@ -230,6 +230,79 @@ final class StorageTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: storage.payloadURL(for: id).path))
     }
 
+    // MARK: - Every file is bound to its role
+
+    /// Same key, same format: without the role in the associated data, a
+    /// payload written from bytes any app can choose (by copying them) would
+    /// load as the vault's state.
+    func testAPayloadCopiedOverTheIndexIsUnreadableNotLoaded() throws {
+        let storage = makeStorage()
+        let forged = try JSONEncoder().encode(sampleState())
+        try storage.writePayload(forged, for: UUID())
+        let payload = try XCTUnwrap(try FileManager.default
+            .contentsOfDirectory(at: storage.payloadsDirectory, includingPropertiesForKeys: nil).first)
+
+        try FileManager.default.copyItem(at: payload, to: storage.indexURL)
+
+        guard case .unreadable = storage.load() else {
+            return XCTFail("a payload must never open as the index")
+        }
+    }
+
+    /// The other direction: the index copied over an image's payload would be
+    /// decrypted and handed to the pasteboard as the "image".
+    func testTheIndexCopiedOverAPayloadDoesNotOpen() throws {
+        let storage = makeStorage()
+        try storage.saveIndex(sampleState())
+        let id = UUID()
+        try storage.writePayload(Data([1, 2, 3]), for: id)
+
+        try FileManager.default.removeItem(at: storage.payloadURL(for: id))
+        try FileManager.default.copyItem(at: storage.indexURL, to: storage.payloadURL(for: id))
+
+        XCTAssertThrowsError(try storage.readPayload(for: id))
+    }
+
+    func testOneItemsPayloadDoesNotOpenAsAnothers() throws {
+        let storage = makeStorage()
+        let a = UUID(), b = UUID()
+        try storage.writePayload(Data("a's image".utf8), for: a)
+
+        try FileManager.default.copyItem(at: storage.payloadURL(for: a), to: storage.payloadURL(for: b))
+
+        XCTAssertEqual(try storage.readPayload(for: a), Data("a's image".utf8))
+        XCTAssertThrowsError(try storage.readPayload(for: b))
+    }
+
+    /// Vaults written before roles existed are sealed with no associated data.
+    /// They open once, come back bound, and the unbound form is never produced
+    /// again.
+    func testAnUnboundVaultIsMigratedAndReboundOnFirstLoad() throws {
+        let storage = makeStorage()
+        let id = UUID()
+        var state = sampleState()
+        state.items = [ClipboardItem(id: id, createdAt: Date(), isPinned: false,
+                                     content: .image(.init(pixelWidth: 1, pixelHeight: 1,
+                                                           byteCount: 3, typeIdentifier: "public.png")),
+                                     sourceBundleID: nil)]
+        try writeSealed(try JSONEncoder().encode(state), to: storage.indexURL)
+        try FileManager.default.createDirectory(at: storage.payloadsDirectory, withIntermediateDirectories: true)
+        try writeSealed(Data([9, 9, 9]), to: storage.payloadURL(for: id))
+
+        guard case .loaded(let loaded) = storage.load() else {
+            return XCTFail("a pre-role vault must still load")
+        }
+        XCTAssertEqual(loaded.items.map(\.id), [id])
+        XCTAssertEqual(try storage.readPayload(for: id), Data([9, 9, 9]))
+
+        // Bound now: the same bytes no longer open without their role.
+        let key = FixedKeyStore().key
+        let rawIndex = try AES.GCM.SealedBox(combined: try Data(contentsOf: storage.indexURL))
+        XCTAssertThrowsError(try AES.GCM.open(rawIndex, using: key))
+        let rawPayload = try AES.GCM.SealedBox(combined: try Data(contentsOf: storage.payloadURL(for: id)))
+        XCTAssertThrowsError(try AES.GCM.open(rawPayload, using: key))
+    }
+
     // MARK: - Quarantine
 
     func testQuarantinePreservesTheOriginalBytes() throws {
