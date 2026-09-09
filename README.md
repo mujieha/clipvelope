@@ -12,8 +12,9 @@ Local‑only macOS clipboard manager with encrypted storage.
 - **Local only**: your clipboard never leaves the machine. No telemetry, no account, no sync.
   A release build contacts exactly one URL — the update feed, once a day, to ask whether a newer
   version exists — and sends nothing about you or what you copied. A build without the updater
-  (`make app`, and what CI produces) makes no network calls at all. `Clipvelope --status` says
-  which one you are running and whether that feed is actually reachable.
+  (`make app`, and what CI produces) makes no network calls at all, not even from `--status`.
+  `Clipvelope --status` says which build you are running and, in a release build, whether
+  that feed is actually reachable.
 - **Encryption at rest**: everything is stored under `~/Library/Application Support/Clipvelope/` encrypted with **AES‑GCM** — the index and each image payload separately.
 - **Key storage**: the encryption key is stored in the macOS **Keychain** under service `com.mujieha.Clipvelope`.
   A signed build puts it in the *data protection* keychain, where it is private to Clipvelope. An **ad-hoc build

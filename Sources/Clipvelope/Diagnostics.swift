@@ -91,7 +91,14 @@ enum Diagnostics {
             return
         }
         print("feed:             \(feed)")
+        // Only a build that would ever contact the feed probes it. A build without
+        // the updater promises to make no network calls at all, and --status is
+        // not an exception to that promise.
+        #if SPARKLE
         print("feed reachable:   \(probe(url))")
+        #else
+        print("feed reachable:   not checked (this build has no updater and makes no network calls)")
+        #endif
     }
 
     /// Fetches the feed once. This is the only network request Clipvelope makes

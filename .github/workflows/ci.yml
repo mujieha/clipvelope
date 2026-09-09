@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, develop]
+    branches: [develop]
   pull_request:
   workflow_dispatch:
 
@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Toolchain
         run: |
@@ -31,7 +31,7 @@ jobs:
           echo "developer dir: $(xcode-select -p)"
 
       - name: Cache SwiftPM build
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .build
           key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
@@ -164,8 +164,11 @@ jobs:
       - name: Build and verify the disk image
         run: SKIP_BUILD=yes ./scripts/make-dmg.sh
 
+      # Not for pull requests: a fork's code would otherwise be published as a
+      # download attributed to this repository.
       - name: Upload app bundle
-        uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: Clipvelope-app
           path: dist/Clipvelope.app
