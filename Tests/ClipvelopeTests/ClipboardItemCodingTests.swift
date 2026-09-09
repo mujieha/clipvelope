@@ -2,6 +2,24 @@ import XCTest
 @testable import Clipvelope
 
 final class ClipboardItemCodingTests: XCTestCase {
+    /// Byte counts arrive in portable backups from anyone. Unclamped, two items
+    /// at Int.max overflow the byte-budget sum and trap on the next copy; one
+    /// item at a terabyte evicts every other entry.
+    func testAbsurdByteCountsAreClampedOnDecode() throws {
+        let image = #"{"pixelWidth":-5,"pixelHeight":10,"byteCount":9223372036854775807,"typeIdentifier":"public.png"}"#
+        let info = try JSONDecoder().decode(ClipboardContent.ImageInfo.self, from: Data(image.utf8))
+        XCTAssertEqual(info.byteCount, ClipboardContent.ImageInfo.maxBytes)
+        XCTAssertEqual(info.pixelWidth, 0)
+
+        let rich = #"{"plainText":"x","byteCount":-1,"typeIdentifier":"public.rtf"}"#
+        let richInfo = try JSONDecoder().decode(ClipboardContent.RichTextInfo.self, from: Data(rich.utf8))
+        XCTAssertEqual(richInfo.byteCount, 0)
+
+        let honest = ClipboardContent.ImageInfo(pixelWidth: 2, pixelHeight: 2, byteCount: 1234, typeIdentifier: "public.png")
+        let roundTrip = try JSONDecoder().decode(ClipboardContent.ImageInfo.self, from: JSONEncoder().encode(honest))
+        XCTAssertEqual(roundTrip, honest)
+    }
+
     private func decode(_ json: String) throws -> ClipboardItem {
         try JSONDecoder().decode(ClipboardItem.self, from: Data(json.utf8))
     }

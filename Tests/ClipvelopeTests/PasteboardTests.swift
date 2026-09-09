@@ -68,6 +68,14 @@ final class CaptureReadingTests: XCTestCase {
         XCTAssertEqual(plain, "x")
     }
 
+    func testOversizedPlainTextIsNotCaptured() {
+        pb.setString(String(repeating: "a", count: ClipboardMonitor.maxTextBytes + 1), forType: .string)
+        XCTAssertNil(ClipboardMonitor.readPayload(from: pb))
+        pb.clearContents()
+        pb.setString(String(repeating: "a", count: ClipboardMonitor.maxTextBytes), forType: .string)
+        XCTAssertNotNil(ClipboardMonitor.readPayload(from: pb))
+    }
+
     func testOversizedRichTextFallsBackToPlainText() {
         pb.setData(Data(count: ClipboardMonitor.maxRichTextBytes + 1), forType: .rtf)
         pb.setString("plain", forType: .string)
@@ -199,6 +207,32 @@ final class StoreCopyingTests: XCTestCase {
 
         let reopened = makeStore()
         XCTAssertEqual(reopened.items.map(\.searchText), ["keep me"], "and it stays gone")
+    }
+
+    /// The shell runs on a global queue; wait for either outcome.
+    private func waitForShell(_ store: ClipboardStore, until done: () -> Bool) {
+        for _ in 0..<150 where !done() {
+            store.drainPendingWork()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
+    func testAQuickSlotCommandCopiesItsOutput() {
+        let store = makeStore()
+        store.runShellAndCopy("printf 'from the shell'")
+        waitForShell(store) { pb.string(forType: .string) != nil }
+        XCTAssertEqual(pb.string(forType: .string), "from the shell")
+        XCTAssertNil(store.notice)
+    }
+
+    func testAFailingQuickSlotCommandLeavesTheClipboardAloneAndSaysSo() {
+        let store = makeStore()
+        pb.setString("keep me", forType: .string)
+        store.runShellAndCopy("echo lost >/dev/null; exit 3")
+        waitForShell(store) { store.notice != nil }
+        XCTAssertEqual(pb.string(forType: .string), "keep me",
+                       "a failed command used to clear the clipboard and paste nothing")
+        XCTAssertEqual(store.notice?.contains("exit 3"), true)
     }
 
     func testCopyingFilesPutsTheirURLsBack() throws {

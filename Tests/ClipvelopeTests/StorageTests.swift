@@ -231,7 +231,6 @@ final class StorageTests: XCTestCase {
     }
 
     // MARK: - Quarantine
-    // MARK: - Quarantine
 
     func testQuarantinePreservesTheOriginalBytes() throws {
         let storage = makeStorage()

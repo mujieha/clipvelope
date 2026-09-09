@@ -249,37 +249,6 @@ enum PanelOpener {
     }
 }
 
-// MARK: - Hotkey
-
-final class HotkeyCenter {
-    static let shared = HotkeyCenter()
-    private var localMonitor: Any?
-    var onCommandF: (() -> Void)?
-
-    func start() {
-        guard localMonitor == nil else { return }
-        let handler: (NSEvent) -> NSEvent? = { [weak self] event in
-            // ⌥1-9 and ⌃⌥V are handled by GlobalHotkeyCenter, which sees the key
-            // even when Clipvelope is not frontmost.
-            if event.modifierFlags.contains(.command), event.keyCode == 3 {
-                self?.onCommandF?()
-                return nil
-            }
-            return event
-        }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            handler(event)
-        }
-    }
-
-    func stop() {
-        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
-        localMonitor = nil
-    }
-
-    deinit { stop() }
-}
-
 // MARK: - Menu Key Handler
 
 /// The keys the history panel answers to while the search field has focus:

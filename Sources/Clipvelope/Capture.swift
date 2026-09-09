@@ -45,13 +45,13 @@ struct CapturedItem {
 }
 
 final class ClipboardMonitor {
-    /// Images larger than this are skipped rather than stored. Even with
-    /// per-item files, an unbounded payload is a way to fill someone's disk.
-    static let maxImageBytes = 32 * 1024 * 1024
+    static let maxImageBytes = ClipboardContent.ImageInfo.maxBytes
+    static let maxRichTextBytes = ClipboardContent.RichTextInfo.maxBytes
 
-    /// Formatted text above this is kept as plain text instead. RTF with
-    /// embedded images can be enormous for what looks like a short paste.
-    static let maxRichTextBytes = 8 * 1024 * 1024
+    /// Plain text above this is not recorded. Text lives inline in the index,
+    /// which is re-encrypted and rewritten on every copy, so one pasted log file
+    /// would tax every copy after it until 200 more pushed it out.
+    static let maxTextBytes = 2 * 1024 * 1024
 
     private var timer: Timer?
     private var lastChangeCount: Int = NSPasteboard.general.changeCount
@@ -117,6 +117,10 @@ final class ClipboardMonitor {
             return rich
         }
         if let string = pb.string(forType: .string), !string.isEmpty {
+            guard string.utf8.count <= maxTextBytes else {
+                NSLog("Clipvelope: skipped a \(string.utf8.count)-byte text, over the \(maxTextBytes)-byte limit")
+                return nil
+            }
             return .text(string)
         }
         return nil

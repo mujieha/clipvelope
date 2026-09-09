@@ -16,11 +16,19 @@ final class ClipboardStore: ObservableObject {
     /// True until the vault has been read. The menu must not claim the history
     /// is empty before it knows: reading the key can take seconds the first time
     /// a newly signed build runs, while macOS validates its signature.
+    @Published private(set) var isLoading = true
     /// Set when an import changed what it was given. Shown in the Backup tab,
     /// because a silent adjustment is indistinguishable from a silent failure.
     @Published private(set) var importNotice: String?
-    @Published private(set) var isLoading = true
+    /// The vault could not be read, or the last save failed. Which one is
+    /// `writesSuspended`; the two must never be offered the same remedy.
     @Published private(set) var storageFailure: StorageFailure?
+    /// True while the vault on disk could not be read and every write is refused.
+    /// Only this state may offer "Start Fresh": a failed save or a failed backup
+    /// must never lead to a readable vault being quarantined.
+    @Published private(set) var writesSuspended = false
+    /// The last backup operation that failed, shown next to the button that ran it.
+    @Published private(set) var backupFailure: String?
     @Published private(set) var items: [ClipboardItem] = []
     @Published var bindings: [ClipboardBinding] = []
     @Published var folders: [CommandFolder] = []
@@ -68,10 +76,6 @@ final class ClipboardStore: ObservableObject {
         return dir.appendingPathComponent("clipvelope-backup.cvb")
     }
 
-    /// Set when the vault exists but could not be read. While true, every write is
-    /// refused: persisting over an unreadable file is what previously destroyed
-    /// history that was only temporarily inaccessible (locked Keychain, denied ACL).
-    private var persistenceSuspended = false
     private var hasLoaded = false
 
     /// Every vault operation runs here. Encryption and disk writes are merely slow,
@@ -177,14 +181,14 @@ final class ClipboardStore: ObservableObject {
         switch outcome {
         case .fresh:
             apply(.empty)
-            persistenceSuspended = false
+            writesSuspended = false
             storageFailure = nil
         case .loaded(let state):
             apply(state)
-            persistenceSuspended = false
+            writesSuspended = false
             storageFailure = nil
         case .unreadable(let error):
-            persistenceSuspended = true
+            writesSuspended = true
             storageFailure = StorageFailure(
                 message: "Your vault could not be decrypted, so saving is paused to "
                     + "protect it. This usually means the Keychain was locked or access "
@@ -196,7 +200,7 @@ final class ClipboardStore: ObservableObject {
         isLoading = false
         // Sweep payload files nothing refers to any more -- the residue of a crash
         // between writing a payload and saving the index.
-        if !persistenceSuspended {
+        if !writesSuspended {
             let live = Set(items.map(\.id))
             ioQueue.async { [weak self] in self?.storage.deletePayloads(notIn: live) }
         }
@@ -270,17 +274,21 @@ final class ClipboardStore: ObservableObject {
 
     /// Retry after the user has unlocked the Keychain or granted access.
     func retryLoadingVault() {
+        guard writesSuspended else { return }
         loadFromStorage()
     }
 
     /// Give up on the unreadable file: move it aside (not delete it) and resume writing.
+    /// Refused unless the vault really is unreadable: called against a readable
+    /// vault this would quarantine the user's whole history.
     func discardUnreadableVault() {
+        guard writesSuspended else { return }
         apply(.empty)
         ioQueue.async { [weak self] in
             guard let self else { return }
             storage.quarantineUnreadableIndex()
             DispatchQueue.main.async {
-                self.persistenceSuspended = false
+                self.writesSuspended = false
                 self.storageFailure = nil
                 self.persist()
             }
@@ -288,7 +296,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func persist() {
-        guard hasLoaded, !persistenceSuspended else { return }
+        guard hasLoaded, !writesSuspended else { return }
         let snapshot = currentState
         let shouldBackUp = autoBackupEnabled
         ioQueue.async { [weak self] in
@@ -493,17 +501,30 @@ final class ClipboardStore: ObservableObject {
             task.arguments = ["-lc", command]
             let pipe = Pipe()
             task.standardOutput = pipe
-            task.standardError = Pipe()
+            // Discarded rather than piped: an unread pipe fills at 64 KB and then
+            // blocks the command until the timeout kills it.
+            task.standardError = FileHandle.nullDevice
+
+            func fail(_ reason: String) {
+                DispatchQueue.main.async {
+                    self.showNotice("Quick Slot command \(reason); the clipboard was left alone.")
+                }
+            }
 
             do {
                 try task.run()
             } catch {
                 NSLog("Shell command error: \(error)")
+                fail("could not start")
                 return
             }
 
+            var timedOut = false
             let timeout = DispatchWorkItem {
-                if task.isRunning { task.terminate() }
+                if task.isRunning {
+                    timedOut = true
+                    task.terminate()
+                }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + Self.shellTimeout,
                                               execute: timeout)
@@ -514,7 +535,19 @@ final class ClipboardStore: ObservableObject {
             task.waitUntilExit()
             timeout.cancel()
 
-            guard let output = String(data: data, encoding: .utf8) else { return }
+            // A failed command must not replace the clipboard with its silence.
+            if timedOut {
+                fail("did not finish within \(Int(Self.shellTimeout)) seconds")
+                return
+            }
+            guard task.terminationStatus == 0 else {
+                fail("failed (exit \(task.terminationStatus))")
+                return
+            }
+            guard let output = String(data: data, encoding: .utf8) else {
+                fail("produced output that is not text")
+                return
+            }
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             DispatchQueue.main.async { self.copyText(trimmed) }
         }
@@ -574,20 +607,39 @@ final class ClipboardStore: ObservableObject {
         folders = []
         thumbnailCache.removeAll()
         autoBackupWork?.cancel()
-        storage.clear()
-        try? FileManager.default.removeItem(at: autoBackupURL)
-        persistenceSuspended = false
+        writesSuspended = false
         storageFailure = nil
-        persist()
+        backupFailure = nil
+        // On the I/O queue, behind any payload write still in flight. Done on the
+        // main thread this raced a queued write, which recreated the payload
+        // directory and left the last copied image on disk after "Delete Everything".
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            storage.clear()
+            try? FileManager.default.removeItem(at: autoBackupURL)
+            DispatchQueue.main.async { self.persist() }
+        }
     }
 
     // MARK: Backup
 
     static func decodeSnapshot(_ data: Data) throws -> VaultSnapshot {
-        if let snapshot = try? JSONDecoder().decode(VaultSnapshot.self, from: data) {
-            return snapshot
+        // AppState decodes every field with a default, deliberately, so that a
+        // vault from any version stays readable. The flip side is that any JSON
+        // object "decodes" -- `{}` becomes an empty vault -- and an import applies
+        // what it decodes. So a backup must carry the one field every vault has
+        // had since the first version before it is accepted as one.
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Not a backup"))
+        }
+        if let state = object["state"] as? [String: Any], state["items"] != nil {
+            return try JSONDecoder().decode(VaultSnapshot.self, from: data)
         }
         // Backups written before payloads existed were a bare AppState.
+        guard object["items"] != nil else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [],
+                                                    debugDescription: "Not a Clipvelope backup: no items"))
+        }
         return VaultSnapshot(state: try JSONDecoder().decode(AppState.self, from: data),
                              payloads: [:])
     }
@@ -611,12 +663,11 @@ final class ClipboardStore: ObservableObject {
                 sealed = try BackupCodec.seal(json, keychainKey: try storage.keyStore.getOrCreateKey())
             }
             try sealed.write(to: url, options: [.atomic])
+            DispatchQueue.main.async { self.backupFailure = nil }
         } catch {
             NSLog("Export error: \(error)")
             DispatchQueue.main.async {
-                self.storageFailure = StorageFailure(
-                    message: "Could not write that backup. (\(error.localizedDescription))"
-                )
+                self.backupFailure = "Could not write that backup. (\(error.localizedDescription))"
             }
         }
     }
@@ -702,15 +753,24 @@ final class ClipboardStore: ObservableObject {
                 case .portable:
                     (state, notes) = self.disarming(imported)
                 }
-                if wasLegacy {
+                // Only the password variant of the old format was weak; a legacy
+                // keychain backup used the full 256-bit key.
+                if wasLegacy && password != nil {
                     notes.append("This backup used the old format, whose password "
                                  + "protection is weak. Export it again to upgrade it.")
                 }
 
+                if self.writesSuspended {
+                    // The unreadable index is ciphertext that may still decrypt once
+                    // the right key is back. A successful import replaces the vault,
+                    // but it must not write over that file.
+                    self.storage.quarantineUnreadableIndex()
+                }
                 self.apply(state)
                 // A successful import is authoritative: it clears a suspended vault.
-                self.persistenceSuspended = false
+                self.writesSuspended = false
                 self.storageFailure = nil
+                self.backupFailure = nil
                 self.hasLoaded = true
                 self.importNotice = notes.isEmpty ? nil : notes.joined(separator: " ")
                 self.persist()
@@ -718,10 +778,8 @@ final class ClipboardStore: ObservableObject {
         } catch {
             NSLog("Import error: \(error)")
             DispatchQueue.main.async {
-                self.storageFailure = StorageFailure(
-                    message: "Could not read that backup. If it was exported with a "
-                        + "password, check the password. (\(error.localizedDescription))"
-                )
+                self.backupFailure = "Could not read that backup. If it was exported with a "
+                    + "password, check the password. (\(error.localizedDescription))"
             }
         }
     }
@@ -784,8 +842,19 @@ final class ClipboardStore: ObservableObject {
         let snapshot = currentState
         ioQueue.async { [weak self] in
             guard let self else { return }
-            let password = (snapshot.autoBackupMode == .password)
-                ? autoBackupPasswordStore.loadAutoBackupPassword() : nil
+            var password: String?
+            if snapshot.autoBackupMode == .password {
+                guard let saved = autoBackupPasswordStore.loadAutoBackupPassword() else {
+                    // Falling back to the keychain key would write a file the user
+                    // believes is portable and cannot open anywhere else. Say so instead.
+                    DispatchQueue.main.async {
+                        self.backupFailure = "Auto backup is set to Password, but no password is "
+                            + "saved. Enter one and click Use the Password Above."
+                    }
+                    return
+                }
+                password = saved
+            }
             exportState(snapshot, to: autoBackupURL, password: password)
         }
     }
@@ -797,7 +866,14 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    func saveAutoBackupPassword(_ password: String) {
-        autoBackupPasswordStore.saveAutoBackupPassword(password)
+    /// False, with `backupFailure` set, when the Keychain refused the write.
+    @discardableResult
+    func saveAutoBackupPassword(_ password: String) -> Bool {
+        if let error = autoBackupPasswordStore.saveAutoBackupPassword(password) {
+            backupFailure = "Could not save the password to the Keychain. (\(error.localizedDescription))"
+            return false
+        }
+        backupFailure = nil
+        return true
     }
 }

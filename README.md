@@ -103,7 +103,9 @@ All in **Preferences → Backup**.
   kept so you can read it and re-enable Shell yourself for anything you recognise. A keychain backup
   can only have been written by this Mac, so it restores unchanged.
 - **Auto backup**: writes `~/Documents/Clipvelope/clipvelope-backup.cvb` on every change, protected
-  by either the Keychain key or your backup password.
+  by either the Keychain key or your backup password. In Password mode nothing is written until a
+  password has been saved; the Backup tab says so rather than silently writing a device-bound file.
+- Every import asks for confirmation first, because it replaces the whole vault, pinned items included.
 
 Backup files start with a `CVB1` header recording the mode and key‑derivation parameters, so the
 format can change without stranding old files. Backups written by earlier versions still import.
@@ -142,7 +144,7 @@ original is moved aside, not deleted.
   preserves it, while pasting into a plain field still gives sensible text. Anything over 8 MB is kept as plain text.
 - Each entry remembers **which app it was copied from** and shows that app's icon in the list.
 - History is capped to the most recent 200 items and 512 MB of image payloads; pinned items are exempt from both.
-- Images larger than 32 MB are skipped rather than stored.
+- Images larger than 32 MB and plain text larger than 2 MB are skipped rather than stored.
 - This app intentionally does **not** sync or upload anything.
 
 ## Development

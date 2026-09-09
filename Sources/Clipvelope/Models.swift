@@ -1,9 +1,5 @@
 import Foundation
 
-extension Notification.Name {
-    static let clipvelopeOpen = Notification.Name("clipvelope.open")
-}
-
 // MARK: - Models
 
 /// What a history entry holds.
@@ -25,18 +21,57 @@ enum ClipboardContent: Codable, Equatable {
     /// and the row label all need it without touching the disk. The RTF or HTML
     /// bytes live in the item's payload file, exactly like an image.
     struct RichTextInfo: Codable, Equatable {
+        /// Formatted text above this is kept as plain text instead. RTF with
+        /// embedded images can be enormous for what looks like a short paste.
+        static let maxBytes = 8 * 1024 * 1024
+
         var plainText: String
         var byteCount: Int
         /// UTI of the stored payload: "public.rtf" or "public.html".
         var typeIdentifier: String
+
+        init(plainText: String, byteCount: Int, typeIdentifier: String) {
+            self.plainText = plainText
+            self.byteCount = byteCount
+            self.typeIdentifier = typeIdentifier
+        }
+
+        // Decoded with the count clamped: this can arrive in a portable backup
+        // from anyone, and an absurd value overflows the byte-budget arithmetic
+        // or evicts the entire history on the next copy.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            plainText = try c.decode(String.self, forKey: .plainText)
+            byteCount = min(max(0, try c.decode(Int.self, forKey: .byteCount)), Self.maxBytes)
+            typeIdentifier = try c.decode(String.self, forKey: .typeIdentifier)
+        }
     }
 
     struct ImageInfo: Codable, Equatable {
+        /// Images larger than this are skipped rather than stored. Even with
+        /// per-item files, an unbounded payload is a way to fill someone's disk.
+        static let maxBytes = 32 * 1024 * 1024
+
         var pixelWidth: Int
         var pixelHeight: Int
         var byteCount: Int
         /// UTI of the stored payload, e.g. "public.png".
         var typeIdentifier: String
+
+        init(pixelWidth: Int, pixelHeight: Int, byteCount: Int, typeIdentifier: String) {
+            self.pixelWidth = pixelWidth
+            self.pixelHeight = pixelHeight
+            self.byteCount = byteCount
+            self.typeIdentifier = typeIdentifier
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            pixelWidth = max(0, try c.decode(Int.self, forKey: .pixelWidth))
+            pixelHeight = max(0, try c.decode(Int.self, forKey: .pixelHeight))
+            byteCount = min(max(0, try c.decode(Int.self, forKey: .byteCount)), Self.maxBytes)
+            typeIdentifier = try c.decode(String.self, forKey: .typeIdentifier)
+        }
     }
 
     struct FileRef: Codable, Equatable {

@@ -34,4 +34,13 @@ final class VaultSnapshotTests: XCTestCase {
     func testGarbageIsRejectedRatherThanDecodingToEmpty() {
         XCTAssertThrowsError(try ClipboardStore.decodeSnapshot(Data("not json".utf8)))
     }
+
+    /// AppState decodes any object, by design. A backup is not any object: an
+    /// import applies what it decodes, so `{}` would replace the history with
+    /// nothing.
+    func testAnObjectWithoutItemsIsNotABackup() {
+        XCTAssertThrowsError(try ClipboardStore.decodeSnapshot(Data("{}".utf8)))
+        XCTAssertThrowsError(try ClipboardStore.decodeSnapshot(Data(#"{"themeMode":"dark"}"#.utf8)))
+        XCTAssertThrowsError(try ClipboardStore.decodeSnapshot(Data(#"{"state":{},"payloads":{}}"#.utf8)))
+    }
 }

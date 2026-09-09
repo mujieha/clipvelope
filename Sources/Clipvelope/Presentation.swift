@@ -177,6 +177,7 @@ struct StripContent: Equatable {
 
     static func describe(isLoading: Bool,
                          savingPaused: Bool,
+                         saveFailed: Bool = false,
                          capturePaused: Bool,
                          recordingPasswords: Bool,
                          itemCount: Int,
@@ -190,6 +191,10 @@ struct StripContent: Equatable {
         if savingPaused {
             return StripContent(symbol: "exclamationmark.triangle.fill",
                                 text: "Saving paused.", degraded: true)
+        }
+        if saveFailed {
+            return StripContent(symbol: "exclamationmark.triangle.fill",
+                                text: "The last change could not be saved.", degraded: true)
         }
         var parts: [String] = []
         if capturePaused { parts.append("Capture paused.") }

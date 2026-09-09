@@ -19,13 +19,6 @@ struct ClipvelopeApp: App {
     @StateObject private var updater = UpdaterController()
 
     init() {
-        HotkeyCenter.shared.onCommandF = {
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .clipvelopeOpen, object: nil)
-            }
-        }
-        HotkeyCenter.shared.start()
-
         GlobalHotkeyCenter.shared.onOpen = { PanelOpener.toggle() }
         DistributedNotificationCenter.default().addObserver(
             forName: Diagnostics.openNotification, object: nil, queue: .main

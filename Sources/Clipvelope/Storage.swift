@@ -159,13 +159,6 @@ final class EncryptedStorage {
         }
     }
 
-    func totalPayloadBytes() -> Int {
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: payloadsDirectory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        return urls.reduce(0) { total, url in
-            total + ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-        }
-    }
 
     // MARK: - Whole vault
 

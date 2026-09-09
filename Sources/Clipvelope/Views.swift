@@ -162,7 +162,7 @@ struct StorageFailureBanner: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                Text("Saving paused").bold()
+                Text(store.writesSuspended ? "Saving paused" : "Could not save").bold()
             }
             .font(.system(size: 12))
             .foregroundColor(.orange)
@@ -171,12 +171,16 @@ struct StorageFailureBanner: View {
                 .font(.system(size: 11))
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 8) {
-                Button("Try Again") { store.retryLoadingVault() }
-                Button("Start Fresh") { store.discardUnreadableVault() }
-                    .help("Moves the unreadable vault aside so it can be recovered later.")
+            // Only an unreadable vault gets these. Offered after a failed save they
+            // would quarantine a vault that is perfectly readable.
+            if store.writesSuspended {
+                HStack(spacing: 8) {
+                    Button("Try Again") { store.retryLoadingVault() }
+                    Button("Start Fresh") { store.discardUnreadableVault() }
+                        .help("Moves the unreadable vault aside so it can be recovered later.")
+                }
+                .controlSize(.small)
             }
-            .controlSize(.small)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -397,7 +401,8 @@ struct StateStrip: View {
 
     private var content: StripContent {
         StripContent.describe(isLoading: store.isLoading,
-                              savingPaused: store.storageFailure != nil,
+                              savingPaused: store.writesSuspended,
+                              saveFailed: store.storageFailure != nil && !store.writesSuspended,
                               capturePaused: store.captureSuspended,
                               recordingPasswords: !store.skipConcealedContent,
                               itemCount: store.items.count,
@@ -640,11 +645,6 @@ struct ClipboardMenuView: View {
             // The popover window is created fresh each time the menu opens, so it
             // needs the appearance applied then, not only when the theme changes.
             AppearanceController.apply(store.themeMode)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                searchFocused = true
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .clipvelopeOpen)) { _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 searchFocused = true
             }
@@ -1138,9 +1138,32 @@ private struct BackupPane: View {
     @ObservedObject var store: ClipboardStore
     @State private var backupPassword: String = ""
     @State private var autoBackupPasswordSaved = false
+    @State private var pendingImport: PendingImport?
+
+    /// An import replaces the whole vault, so it asks first, like Clear does.
+    private enum PendingImport: Identifiable {
+        case keychain, password, autoBackup
+        var id: Int { hashValue }
+    }
+
+    private func run(_ kind: PendingImport) {
+        switch kind {
+        case .keychain: store.manualImportKeychain()
+        case .password: store.manualImportPassword(backupPassword)
+        case .autoBackup:
+            store.restoreFromAutoBackup(
+                password: store.autoBackupMode == .password ? backupPassword : nil)
+        }
+    }
 
     var body: some View {
         Form {
+            if let failure = store.backupFailure {
+                Section {
+                    Label(failure, systemImage: "xmark.octagon.fill")
+                        .foregroundColor(.red)
+                }
+            }
             if let notice = store.importNotice {
                 Section {
                     Label(notice, systemImage: "exclamationmark.triangle.fill")
@@ -1151,7 +1174,7 @@ private struct BackupPane: View {
             Section {
                 HStack {
                     Button("Export…") { store.manualExportKeychain() }
-                    Button("Import…") { store.manualImportKeychain() }
+                    Button("Import…") { pendingImport = .keychain }
                 }
             } header: {
                 Text("This Mac")
@@ -1165,7 +1188,7 @@ private struct BackupPane: View {
                 HStack {
                     Button("Export…") { store.manualExportPassword(backupPassword) }
                         .disabled(backupPassword.isEmpty)
-                    Button("Import…") { store.manualImportPassword(backupPassword) }
+                    Button("Import…") { pendingImport = .password }
                         .disabled(backupPassword.isEmpty)
                 }
             } header: {
@@ -1191,8 +1214,7 @@ private struct BackupPane: View {
                     if store.autoBackupMode == .password {
                         HStack {
                             Button("Use the Password Above") {
-                                store.saveAutoBackupPassword(backupPassword)
-                                autoBackupPasswordSaved = true
+                                autoBackupPasswordSaved = store.saveAutoBackupPassword(backupPassword)
                             }
                             .disabled(backupPassword.isEmpty)
                             if autoBackupPasswordSaved {
@@ -1201,12 +1223,8 @@ private struct BackupPane: View {
                         }
                     }
 
-                    Button("Restore from Auto Backup…") {
-                        store.restoreFromAutoBackup(
-                            password: store.autoBackupMode == .password ? backupPassword : nil
-                        )
-                    }
-                    .disabled(store.autoBackupMode == .password && backupPassword.isEmpty)
+                    Button("Restore from Auto Backup…") { pendingImport = .autoBackup }
+                        .disabled(store.autoBackupMode == .password && backupPassword.isEmpty)
                 }
             } header: {
                 Text("Auto backup")
@@ -1215,5 +1233,15 @@ private struct BackupPane: View {
             }
         }
         .formStyle(.grouped)
+        .alert("Replace your history with this backup?",
+               isPresented: Binding(get: { pendingImport != nil },
+                                    set: { if !$0 { pendingImport = nil } }),
+               presenting: pendingImport) { kind in
+            Button("Cancel", role: .cancel) {}
+            Button("Replace History", role: .destructive) { run(kind) }
+        } message: { _ in
+            Text("Everything in the vault now, pinned items included, is replaced by the "
+                 + "backup's contents. This cannot be undone.")
+        }
     }
 }
