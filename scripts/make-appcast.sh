@@ -39,27 +39,41 @@ text = open("CHANGELOG.md").read()
 m = re.search(r"^## " + re.escape(ver) + r"\s*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
 if not m:
     sys.exit(f"CHANGELOG.md has no section for {ver}")
+
+def inline(s):
+    """Escape, then render `code` spans. Escaping first keeps the markup safe."""
+    return re.sub(r"`([^`]+)`", r"<code>\1</code>", html.escape(s))
+
 out, items = [], []
 def flush():
     global items
     if items:
         out.append("<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>")
         items = []
+
 for para in re.split(r"\n\s*\n", m.group(1).strip()):
     lines = [l.strip() for l in para.splitlines()]
-    if all(l.startswith("- ") or not l.startswith("-") and i > 0 for i, l in enumerate(lines)) and lines[0].startswith("- "):
+    if lines[0].startswith("#"):
+        # A heading is its own paragraph; depth maps to h3/h4 so the update
+        # prompt shows structure rather than literal hashes.
+        flush()
+        level = len(lines[0]) - len(lines[0].lstrip("#"))
+        tag = "h3" if level <= 3 else "h4"
+        out.append(f"<{tag}>{inline(lines[0].lstrip('#').strip())}</{tag}>")
+        continue
+    if lines[0].startswith("- "):
         cur = []
         for l in lines:
             if l.startswith("- "):
-                if cur: items.append(html.escape(" ".join(cur)))
+                if cur: items.append(inline(" ".join(cur)))
                 cur = [l[2:]]
             else:
                 cur.append(l)
-        if cur: items.append(html.escape(" ".join(cur)))
+        if cur: items.append(inline(" ".join(cur)))
         flush()
     else:
         flush()
-        out.append("<p>" + html.escape(" ".join(lines)) + "</p>")
+        out.append("<p>" + inline(" ".join(lines)) + "</p>")
 flush()
 print("\n".join(out))
 EOF
