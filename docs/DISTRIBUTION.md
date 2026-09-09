@@ -28,6 +28,8 @@ to them.
 
 ```bash
 CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" make release
+make notarize TARGET=dist/Clipvelope.app          # staple the app first
+make dmg                                          # image now holds a stapled app
 make notarize TARGET=dist/Clipvelope-<version>.dmg
 make appcast
 ```
@@ -80,7 +82,10 @@ feed. `Clipvelope --status` reports whether the feed answers with an appcast.
 1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`.
 2. Add the `## <version>` section to `CHANGELOG.md`; CI refuses a version without one.
 3. `make check && make test`.
-4. `make release`, then `make notarize`, then the quarantined check above.
+4. `make release`, then notarize the app, rebuild the image, notarize the image,
+   then the quarantined check above. Notarizing the app before the image is
+   built is what lets a first launch succeed with no network: the app carries
+   its own ticket instead of having to ask Apple.
 5. `make appcast`, publish the DMG and the appcast together.
 
 ## The vault across updates

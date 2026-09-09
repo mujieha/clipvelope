@@ -97,8 +97,24 @@ if [ "$bad" != 0 ]; then
     exit 1
 fi
 
+# notarytool takes a .zip, .pkg or .dmg, never a bare bundle, so an .app is
+# zipped for the trip. The ticket is stapled to the original .app afterwards,
+# which is the point of notarizing it separately: an app stapled before it is
+# placed in the disk image carries its own ticket, so its first launch works
+# even with no network. Staple only the image and that first launch has to
+# reach Apple.
+UPLOAD="$TARGET"
+CLEANUP=""
+if [ "${TARGET%.app}" != "$TARGET" ] || [ "${TARGET%.app/}" != "$TARGET" ]; then
+    UPLOAD=$(mktemp -d)/$(basename "${TARGET%/}").zip
+    CLEANUP="$UPLOAD"
+    echo "zipping $TARGET for upload ..."
+    ditto -c -k --keepParent "$TARGET" "$UPLOAD"
+fi
+
 echo "submitting $TARGET ..."
-submission=$(xcrun notarytool submit "$TARGET" --keychain-profile "$PROFILE" --wait 2>&1 | tee /dev/stderr)
+submission=$(xcrun notarytool submit "$UPLOAD" --keychain-profile "$PROFILE" --wait 2>&1 | tee /dev/stderr)
+[ -n "$CLEANUP" ] && rm -f "$CLEANUP"
 status=$(printf '%s\n' "$submission" | awk '/^ *status:/ {s=$2} END {print s}')
 if [ "$status" != "Accepted" ]; then
     id=$(printf '%s\n' "$submission" | awk '/^ *id:/ {print $2; exit}')
