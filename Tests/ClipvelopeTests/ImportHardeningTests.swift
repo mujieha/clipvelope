@@ -51,8 +51,9 @@ final class ImportHardeningTests: XCTestCase {
         return state
     }
 
-    private func writeBackup(_ state: AppState, to url: URL, password: String?) throws {
-        let json = try JSONEncoder().encode(VaultSnapshot(state: state, payloads: [:]))
+    private func writeBackup(_ state: AppState, to url: URL, password: String?,
+                             payloads: [String: Data] = [:]) throws {
+        let json = try JSONEncoder().encode(VaultSnapshot(state: state, payloads: payloads))
         let sealed: Data
         if let password {
             sealed = try BackupCodec.seal(json, password: password, iterations: 100_000)
@@ -288,6 +289,121 @@ final class ImportHardeningTests: XCTestCase {
 
         XCTAssertTrue(store.bindings.isEmpty, "a payload file must not import as a trusted backup")
         XCTAssertNotNil(store.backupFailure, "and the attempt must be reported")
+    }
+
+    // MARK: - Payloads inside a backup are input too
+
+    /// Capture refuses a picture whose header declares more pixels than any
+    /// decoder should allocate. A backup is the same hostile input: its payload
+    /// is decoded later to draw the row's thumbnail.
+    func testAnImportedImageDeclaringTooManyPixelsIsLeftOut() throws {
+        let store = makeStore()
+        let id = UUID()
+        var state = AppState.empty
+        state.items = [
+            ClipboardItem(id: id, createdAt: Date(), isPinned: false,
+                          content: .image(.init(pixelWidth: 2, pixelHeight: 2,
+                                                byteCount: 120, typeIdentifier: "public.png")),
+                          sourceBundleID: nil),
+            ClipboardItem(text: "an ordinary snippet"),
+        ]
+        let bomb = compressiblePNG(width: 9000, height: 9000)
+        let url = root.appendingPathComponent("bomb.cvb")
+        try writeBackup(state, to: url, password: "pw", payloads: [id.uuidString: bomb])
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertEqual(store.items.map(\.searchText), ["an ordinary snippet"],
+                       "the decompression bomb must not become a history row")
+    }
+
+    func testAnImportedPayloadThatIsNotWhatItsItemClaimsIsLeftOut() throws {
+        let id = UUID()
+        let image = ClipboardContent.image(.init(pixelWidth: 2, pixelHeight: 2,
+                                                 byteCount: 10, typeIdentifier: "public.png"))
+        XCTAssertFalse(ClipboardStore.payloadIsAcceptable(Data("not a png".utf8), for: image))
+        XCTAssertTrue(ClipboardStore.payloadIsAcceptable(compressiblePNG(width: 4, height: 4), for: image))
+
+        let rich = ClipboardContent.richText(.init(plainText: "hi", byteCount: 2, typeIdentifier: "public.rtf"))
+        XCTAssertTrue(ClipboardStore.payloadIsAcceptable(Data("{\\rtf1}".utf8), for: rich))
+        XCTAssertFalse(ClipboardStore.payloadIsAcceptable(
+            Data(count: ClipboardContent.RichTextInfo.maxBytes + 1), for: rich))
+
+        // Neither of these keeps a payload file at all.
+        XCTAssertFalse(ClipboardStore.payloadIsAcceptable(Data([1]), for: .text("x")))
+        XCTAssertFalse(ClipboardStore.payloadIsAcceptable(Data([1]), for: .files([.init(path: "/tmp/x")])))
+        _ = id
+    }
+
+    // MARK: - What one backup may install
+
+    func testAnImportIsCappedSoAPinnedFloodCannotGrowTheVaultForever() throws {
+        let store = makeStore()
+        var state = AppState.empty
+        state.items = (0..<(ClipboardStore.maxImportedItems + 50)).map {
+            ClipboardItem(id: UUID(), createdAt: Date(), isPinned: true,
+                          content: .text("entry \($0)"), sourceBundleID: nil)
+        }
+        let url = root.appendingPathComponent("flood.cvb")
+        try writeBackup(state, to: url, password: "pw")
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertEqual(store.items.count, ClipboardStore.maxImportedItems)
+    }
+
+    func testAnOversizedEntryIsLeftOutOfAnImport() throws {
+        let store = makeStore()
+        var state = AppState.empty
+        state.items = [
+            ClipboardItem(text: String(repeating: "x", count: ClipboardMonitor.maxTextBytes + 1)),
+            ClipboardItem(text: "keep me"),
+        ]
+        let url = root.appendingPathComponent("huge.cvb")
+        try writeBackup(state, to: url, password: "pw")
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertEqual(store.items.map(\.searchText), ["keep me"])
+    }
+
+    func testABackupWithDuplicateBindingIDsImportsWithoutDuplicates() throws {
+        let store = makeStore()
+        let id = UUID()
+        var state = AppState.empty
+        state.items = [ClipboardItem(text: "x")]
+        state.bindings = [
+            ClipboardBinding(id: id, title: "first", content: "a", isShell: false),
+            ClipboardBinding(id: id, title: "second", content: "b", isShell: false),
+        ]
+        let url = root.appendingPathComponent("dupe-bindings.cvb")
+        try writeBackup(state, to: url, password: "pw")
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertEqual(store.bindings.map(\.title), ["first"])
+    }
+
+    // MARK: - The retired backup format
+
+    /// Pre-release builds wrote headerless files. They are refused now, and the
+    /// message must say why rather than blame the password.
+    func testAPreReleaseBackupSaysSoRatherThanBlamingThePassword() throws {
+        let store = makeStore()
+        let headerless = try XCTUnwrap(
+            AES.GCM.seal(Data(#"{"items":[]}"#.utf8), using: FixedKeyStore(seed: 1).key).combined)
+        let url = root.appendingPathComponent("pre-release.cvb")
+        try headerless.write(to: url)
+
+        store.importBackup(from: url, password: nil)
+        settle(store)
+
+        XCTAssertTrue(store.backupFailure?.contains("pre-release") ?? false,
+                      "got: \(store.backupFailure ?? "nil")")
     }
 
     // MARK: - Duplicate ids

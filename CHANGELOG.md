@@ -29,6 +29,13 @@ First release.
   switch automatic backups on or off, change their mode, rebind shortcuts, or
   add file rows, which would otherwise hand a paste target any file whose path
   the backup's author guessed.
+- A vault that reads but cannot be written back, because the disk is full or
+  its folder is read-only, now says so and keeps your history on screen. It is
+  no longer reported as undecryptable, which offered a repair that moves the
+  vault aside.
+- Imported backups are held to the limits capture enforces: an entry whose
+  stored bytes do not match what it claims is left out, and so are oversized
+  entries and anything past a thousand of them.
 - Hostile input is refused before it costs anything: a backup may demand at most
   ten million key-derivation rounds, an image is checked against its declared
   pixel count before decoding, and formatted text with an oversized plain

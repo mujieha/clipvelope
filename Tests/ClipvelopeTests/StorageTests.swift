@@ -303,6 +303,43 @@ final class StorageTests: XCTestCase {
         XCTAssertThrowsError(try AES.GCM.open(rawPayload, using: key))
     }
 
+    // MARK: - A vault that reads but cannot be written back
+
+    /// The upgrade to role-bound files rewrites the vault. If that write fails,
+    /// the history is still perfectly readable, and calling it "unreadable"
+    /// steers the user to a repair that moves their whole vault aside.
+    func testAVaultThatReadsButCannotBeRewrittenIsNotCalledUnreadable() throws {
+        let storage = makeStorage()
+        try writeSealed(try JSONEncoder().encode(sampleState()), to: storage.indexURL)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+
+        guard case .loadedButUnwritable(let state, _) = storage.load() else {
+            return XCTFail("a readable vault whose rewrite fails must report .loadedButUnwritable")
+        }
+        XCTAssertEqual(state.items.map(\.searchText), ["hello"],
+                       "and it must still hand back the history it read")
+    }
+
+    /// The index is written last on purpose: leaving it unbound means the next
+    /// launch simply tries the upgrade again.
+    func testAFailedUpgradeLeavesTheVaultReadableForTheNextLaunch() throws {
+        let storage = makeStorage()
+        try writeSealed(try JSONEncoder().encode(sampleState()), to: storage.indexURL)
+        let before = try Data(contentsOf: storage.indexURL)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        _ = storage.load()
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+
+        XCTAssertEqual(try Data(contentsOf: storage.indexURL), before, "the vault must be untouched")
+        guard case .loaded(let state) = storage.load() else {
+            return XCTFail("with the directory writable again the upgrade must succeed")
+        }
+        XCTAssertEqual(state.items.map(\.searchText), ["hello"])
+    }
+
     // MARK: - Quarantine
 
     func testQuarantinePreservesTheOriginalBytes() throws {

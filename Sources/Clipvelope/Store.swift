@@ -27,6 +27,10 @@ final class ClipboardStore: ObservableObject {
     /// Only this state may offer "Start Fresh": a failed save or a failed backup
     /// must never lead to a readable vault being quarantined.
     @Published private(set) var writesSuspended = false
+    /// True only when the vault could not be *decrypted*. "Start Fresh" moves
+    /// the vault aside, so it must never be offered for a vault that read
+    /// perfectly and merely could not be written back.
+    @Published private(set) var canDiscardVault = false
     /// The last backup operation that failed, shown next to the button that ran it.
     @Published private(set) var backupFailure: String?
     @Published private(set) var items: [ClipboardItem] = []
@@ -59,6 +63,9 @@ final class ClipboardStore: ObservableObject {
     /// `storage.keyStore`, so the vault and its backups cannot diverge.
     private let autoBackupPasswordStore = KeychainKeyStore()
     private let maxItems = 200
+    /// A ceiling on what one untrusted backup may install, well above any vault
+    /// this app produces and far below a file built to fill a disk.
+    static let maxImportedItems = 1_000
     /// Ceiling on stored image bytes. A count-based cap alone would happily
     /// hold 200 screenshots.
     private let maxPayloadBytes = 512 * 1024 * 1024
@@ -182,13 +189,29 @@ final class ClipboardStore: ObservableObject {
         case .fresh:
             apply(.empty)
             writesSuspended = false
+            canDiscardVault = false
             storageFailure = nil
         case .loaded(let state):
             apply(state)
             writesSuspended = false
+            canDiscardVault = false
             storageFailure = nil
+        case .loadedButUnwritable(let state, let error):
+            // The history is here and is shown. Only saving stops, and the
+            // remedy offered is the one that fits: free space, then retry.
+            apply(state)
+            writesSuspended = true
+            canDiscardVault = false
+            storageFailure = StorageFailure(
+                message: "Your history is here and readable, but Clipvelope could not "
+                    + "finish updating its own files, so saving is paused rather than "
+                    + "leave the vault half-updated. This usually means the disk is "
+                    + "full or its folder is read-only. (\(error.localizedDescription))"
+            )
+            NSLog("%@", "Clipvelope: vault readable but not writable, writes suspended: \(error)")
         case .unreadable(let error):
             writesSuspended = true
+            canDiscardVault = true
             storageFailure = StorageFailure(
                 message: "Your vault could not be decrypted, so saving is paused to "
                     + "protect it. This usually means the Keychain was locked or access "
@@ -211,8 +234,12 @@ final class ClipboardStore: ObservableObject {
 
     private func apply(_ state: AppState) {
         items = state.items.removingDuplicateIDs()
-        bindings = state.bindings
-        folders = state.folders
+        bindings = state.bindings.removingDuplicateIDs()
+        folders = state.folders.removingDuplicateIDs().map {
+            var folder = $0
+            folder.items = folder.items.removingDuplicateIDs()
+            return folder
+        }
         autoBackupEnabled = state.autoBackupEnabled
         autoBackupMode = state.autoBackupMode
         themeMode = state.themeMode
@@ -282,7 +309,7 @@ final class ClipboardStore: ObservableObject {
     /// Refused unless the vault really is unreadable: called against a readable
     /// vault this would quarantine the user's whole history.
     func discardUnreadableVault() {
-        guard writesSuspended else { return }
+        guard writesSuspended, canDiscardVault else { return }
         apply(.empty)
         ioQueue.async { [weak self] in
             guard let self else { return }
@@ -724,8 +751,16 @@ final class ClipboardStore: ObservableObject {
             notes.append("The backup had password-skipping switched off; it was left on.")
         }
         // Union, so an import can add apps to ignore but never remove them.
+        // Adding is the safe direction for privacy but stops capture, so it is
+        // still a change the user should hear about.
+        let newlyIgnored = Set(state.ignoredAppBundleIDs).subtracting(ignoredAppBundleIDs)
         state.ignoredAppBundleIDs = Array(Set(state.ignoredAppBundleIDs)
             .union(ignoredAppBundleIDs)).sorted()
+        if !newlyIgnored.isEmpty {
+            notes.append("\(newlyIgnored.count) app\(newlyIgnored.count == 1 ? "" : "s") "
+                         + "the backup listed will now be skipped when you copy from "
+                         + "\(newlyIgnored.count == 1 ? "it" : "them").")
+        }
         state.captureSuspended = captureSuspended
         // Shortcuts are this Mac's business, not the backup's.
         state.openHotkey = openHotkey
@@ -743,6 +778,23 @@ final class ClipboardStore: ObservableObject {
         // The paths in someone else's backup describe their machine, so at
         // best they are dead and at worst they name something worth stealing
         // on this one -- ~/.ssh/id_rsa under a row labelled like a report.
+        // Pinned rows are exempt from the history cap by design, so a backup of
+        // nothing but pinned rows would grow the vault forever; and inline text
+        // is re-encrypted on every copy, which is why capture caps it. A file
+        // gets neither exemption.
+        let overlongText = state.items.filter { $0.searchText.utf8.count > ClipboardMonitor.maxTextBytes }
+        if !overlongText.isEmpty {
+            let ids = Set(overlongText.map(\.id))
+            state.items.removeAll { ids.contains($0.id) }
+            notes.append("\(ids.count) oversized entr\(ids.count == 1 ? "y was" : "ies were") left out.")
+        }
+        if state.items.count > Self.maxImportedItems {
+            let dropped = state.items.count - Self.maxImportedItems
+            state.items = Array(state.items.prefix(Self.maxImportedItems))
+            notes.append("The backup held more than \(Self.maxImportedItems) entries; "
+                         + "the oldest \(dropped) were left out.")
+        }
+
         let fileItems = state.items.filter { if case .files = $0.content { return true } else { return false } }
         if !fileItems.isEmpty {
             state.items.removeAll { if case .files = $0.content { return true } else { return false } }
@@ -753,9 +805,39 @@ final class ClipboardStore: ObservableObject {
         return (state, notes)
     }
 
+    /// Whether a payload out of a backup is really the thing its item claims,
+    /// and stays inside the limits capture enforces.
+    static func payloadIsAcceptable(_ data: Data, for content: ClipboardContent) -> Bool {
+        switch content {
+        case .image:
+            guard data.count <= ClipboardMonitor.maxImageBytes,
+                  data.starts(with: ClipboardMonitor.pngSignature),
+                  let size = ClipboardMonitor.declaredPixelSize(of: data),
+                  ClipboardMonitor.acceptsImage(pixelWidth: size.0, pixelHeight: size.1)
+            else { return false }
+            return true
+        case .richText:
+            return data.count <= ClipboardMonitor.maxRichTextBytes
+        case .text, .files:
+            // Neither keeps a payload file, so a payload claiming to be one is
+            // not something this app wrote.
+            return false
+        }
+    }
+
     private func importState(from url: URL, password: String?) {
         do {
             let data = try Data(contentsOf: url)
+            // Pre-release builds wrote headerless files. Those are refused now,
+            // and saying so beats the generic "check the password".
+            guard !BackupCodec.isPreReleaseFormat(data) else {
+                DispatchQueue.main.async {
+                    self.backupFailure = "That file was written by a pre-release version of "
+                        + "Clipvelope, whose backup format is no longer accepted. Export a "
+                        + "fresh backup from a vault you can still open."
+                }
+                return
+            }
             let decrypted: Data
             if let password {
                 decrypted = try BackupCodec.open(data, password: password)
@@ -764,19 +846,45 @@ final class ClipboardStore: ObservableObject {
             }
             let trust: BackupTrust = password == nil ? .deviceBound : .portable
             let snapshot = try Self.decodeSnapshot(decrypted)
+
+            // Payload bytes come out of the file, and an image payload is decoded
+            // later to draw a thumbnail. Capture checks a picture's declared size
+            // before decoding it precisely so a small file cannot demand an
+            // enormous raster; a backup is the same hostile input and gets the
+            // same check, against what its own item claims to be.
+            let declared = Dictionary(snapshot.state.items.map { ($0.id, $0.content) },
+                                      uniquingKeysWith: { first, _ in first })
+            var rejected: Set<UUID> = []
             for (key, data) in snapshot.payloads {
                 guard let id = UUID(uuidString: key) else { continue }
+                guard let content = declared[id],
+                      Self.payloadIsAcceptable(data, for: content) else {
+                    rejected.insert(id)
+                    continue
+                }
                 try? storage.writePayload(data, for: id)
             }
+
             let imported = snapshot.state
             DispatchQueue.main.async {
                 var notes: [String] = []
-                let state: AppState
+                var state: AppState
                 switch trust {
                 case .deviceBound:
                     state = imported
                 case .portable:
                     (state, notes) = self.disarming(imported)
+                }
+                if !rejected.isEmpty {
+                    let before = state.items.count
+                    state.items.removeAll { rejected.contains($0.id) }
+                    let dropped = before - state.items.count
+                    if dropped > 0 {
+                        notes.append("\(dropped) entr\(dropped == 1 ? "y was" : "ies were") left "
+                                     + "out: what the backup stored for \(dropped == 1 ? "it" : "them") "
+                                     + "did not match what it said \(dropped == 1 ? "it" : "they") "
+                                     + "contained.")
+                    }
                 }
 
                 if self.writesSuspended {

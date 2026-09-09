@@ -134,11 +134,13 @@ struct ClipboardItem: Codable, Identifiable, Equatable {
     var hasPayloadFile: Bool { payloadByteCount > 0 }
 }
 
-extension Array where Element == ClipboardItem {
-    /// Keeps the first item with each id. Views index rows by id, and the ids
-    /// come out of a file, so they are unique only if something makes them so.
-    func removingDuplicateIDs() -> [ClipboardItem] {
-        var seen = Set<UUID>()
+extension Array where Element: Identifiable {
+    /// Keeps the first element with each id. Views index rows by id, and the
+    /// ids come out of a file, so they are unique only if something makes them
+    /// so: `ForEach` renders undefined output on a repeat, and the row map in
+    /// the history panel used to trap outright.
+    func removingDuplicateIDs() -> [Element] {
+        var seen = Set<Element.ID>()
         return filter { seen.insert($0.id).inserted }
     }
 }

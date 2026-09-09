@@ -34,11 +34,33 @@ released, and you will be credited in the changelog unless you prefer not to be.
 - Every encrypted file is bound to its role, the index or the payload of one
   specific item, so a file the app wrote for one purpose cannot be presented
   to it as another, and a backup must carry its header.
-- `Clipvelope --open` and `--preferences` act only on requests that carry the
-  token this launch stored in the app's Keychain item; a bare notification on
-  the same name is ignored.
+- `Clipvelope --open` and `--preferences` ignore a bare notification on their
+  name; a request must carry the token this launch stored in the app's Keychain
+  item. Read the first known limit below for what that does and does not buy.
 - Portable backups disable the shell flag on every imported command and cannot
   weaken privacy settings, change whether or where this Mac writes its own
   backups, rebind shortcuts, or plant file references.
 
 If you can show one of those claims to be false, that is a vulnerability.
+
+## Known limits
+
+These are understood and deliberate. A report that restates one is welcome as a
+suggestion, but it is not a vulnerability report.
+
+- **`--open` is not a security boundary.** Anything running as your macOS user
+  can execute Clipvelope's own binary, and that binary can read the token that
+  authenticates the request, so it can open the panel. The token stops a process
+  that merely posts a notification, which costs an attacker nothing; it cannot
+  stop one that runs the app. No peer check would change this, because the
+  caller really is Clipvelope. Displaying the panel discloses history only to
+  something that can also see the screen, which macOS gates behind Screen
+  Recording consent.
+- **An unsigned build protects nothing from other programs you run.** Without a
+  signing identity there is no data protection keychain, so both the vault key
+  and that token live in the file keychain, which any program you run can read.
+  `Clipvelope --status` reports which keychain is in use.
+- **The vault has no rollback counter.** Each file authenticates its own role,
+  so contents cannot be forged or swapped between roles, but anyone who can
+  write the vault directory can restore an older copy of files they took from it
+  earlier and return your history to that earlier state.

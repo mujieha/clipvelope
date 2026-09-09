@@ -6,11 +6,21 @@ import AppKit
 ///
 /// The transport is a distributed notification, which any process in the login
 /// session can post, a sandboxed one included. Acting on the bare name would let
-/// any such process put the decrypted history on screen whenever it chose. So
-/// each launch mints a random token, keeps it in the app's Keychain item (which
-/// in a signed build only this app can read) and ignores any request that does
-/// not carry it. The command-line side is the same binary: it reads the token
-/// back and sends it along.
+/// any such process put the decrypted history on screen for the cost of one
+/// line of code. So each launch mints a random token, keeps it in the app's
+/// Keychain item, and ignores any request that does not carry it. The
+/// command-line side is the same binary: it reads the token back and sends it
+/// along.
+///
+/// What this is and is not. It raises the cost of the trivial attack, and that
+/// is all it does. It is **not** a security boundary, because the credential is
+/// held by a *code identity* rather than by a person: anything running as this
+/// user can execute Clipvelope's own binary with `--open`, and that child reads
+/// the same token legitimately. No peer check fixes that, XPC code-signing
+/// requirements included, because the caller genuinely is Clipvelope. In an
+/// unsigned build it is weaker still: the token sits in the file keychain,
+/// which any program the user runs can read. SECURITY.md says so plainly under
+/// "Known limits"; do not write a claim here that the design cannot keep.
 enum RemoteControl {
     static let openNotification = Notification.Name("com.mujieha.Clipvelope.open")
     static let preferencesNotification = Notification.Name("com.mujieha.Clipvelope.preferences")
@@ -23,12 +33,18 @@ enum RemoteControl {
 
     static func arm(keyStore: KeychainKeyStore = KeychainKeyStore()) {
         let fresh = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
-        do {
-            try keyStore.saveRemoteControlToken(fresh)
-            token = fresh
-        } catch {
-            token = nil
-            NSLog("%@", "Clipvelope: --open and --preferences are disabled, the Keychain would not hold their token: \(error)")
+        // Keychain calls can block on a system dialog, and this runs while the
+        // app is starting. On the main thread that freezes a menu-bar app before
+        // it owns a window the dialog could sit over. Requests are refused until
+        // this lands, which is the safe direction.
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try keyStore.saveRemoteControlToken(fresh)
+                DispatchQueue.main.async { token = fresh }
+            } catch {
+                DispatchQueue.main.async { token = nil }
+                NSLog("%@", "Clipvelope: --open and --preferences are disabled, the Keychain would not hold their token: \(error)")
+            }
         }
     }
 

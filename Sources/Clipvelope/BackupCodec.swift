@@ -108,6 +108,13 @@ enum BackupCodec {
 
     // MARK: Reading
 
+    /// True for a file written before the CVB1 header existed. Those can no
+    /// longer be opened; recognising them exists only to say exactly that
+    /// instead of blaming the password.
+    static func isPreReleaseFormat(_ file: Data) -> Bool {
+        header(of: file) == nil
+    }
+
     static func open(_ file: Data, keychainKey: SymmetricKey) throws -> Data {
         guard let (mode, body) = header(of: file) else { throw CodecError.malformed }
         guard mode == .keychain else { throw CodecError.wrongMode }

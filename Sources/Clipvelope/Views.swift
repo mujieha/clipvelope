@@ -177,8 +177,13 @@ struct StorageFailureBanner: View {
             if store.writesSuspended {
                 HStack(spacing: 8) {
                     Button("Try Again") { store.retryLoadingVault() }
-                    Button("Start Fresh") { store.discardUnreadableVault() }
-                        .help("Moves the unreadable vault aside so it can be recovered later.")
+                    // Only for a vault that would not decrypt. Against one that
+                    // read fine and merely could not be written, this would
+                    // quarantine the user's whole history.
+                    if store.canDiscardVault {
+                        Button("Start Fresh") { store.discardUnreadableVault() }
+                            .help("Moves the unreadable vault aside so it can be recovered later.")
+                    }
                 }
                 .controlSize(.small)
             }

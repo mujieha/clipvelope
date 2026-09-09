@@ -33,6 +33,11 @@ final class EncryptedStorage {
     enum LoadOutcome {
         case fresh
         case loaded(AppState)
+        /// Decrypted fine, could not be written back. The history is intact and
+        /// is shown; only saving pauses. Kept apart from `unreadable` because
+        /// the remedy for that one moves the vault aside, which against a
+        /// perfectly readable vault destroys it.
+        case loadedButUnwritable(AppState, Error)
         case unreadable(Error)
     }
 
@@ -93,17 +98,36 @@ final class EncryptedStorage {
     /// The original is moved aside rather than deleted, and only after the new
     /// index is on disk, so a failure part-way through cannot lose history.
     private func migrateLegacyBlob() -> LoadOutcome {
+        let state: AppState
         do {
-            let state = try decodeState(try readSealed(at: legacyBlobURL, role: nil))
-            try saveIndex(state)
-            try? FileManager.default.moveItem(
-                at: legacyBlobURL,
-                to: directory.appendingPathComponent("clipboard.db.migrated")
-            )
-            return .loaded(state)
+            state = try decodeState(try readSealed(at: legacyBlobURL, role: nil))
         } catch {
             return .unreadable(error)
         }
+        do {
+            try saveIndex(state)
+        } catch {
+            return .loadedButUnwritable(state, error)
+        }
+        archiveMigratedBlob()
+        return .loaded(state)
+    }
+
+    /// Keeps the migrated original, so a failure part-way cannot lose history,
+    /// but re-seals it under its own role first.
+    ///
+    /// Left as it was it is a valid *unbound* index, and the upgrade path below
+    /// accepts one of those: anyone who can write this directory could rename it
+    /// back over `index.cvi` and roll the vault to its pre-1.0 state, which is
+    /// applied with none of the filtering an import gets.
+    private func archiveMigratedBlob() {
+        let archive = directory.appendingPathComponent("clipboard.db.migrated")
+        if let plaintext = try? readSealed(at: legacyBlobURL, role: nil),
+           (try? writeSealed(plaintext, to: archive, role: Self.archiveRole)) != nil {
+            try? FileManager.default.removeItem(at: legacyBlobURL)
+            return
+        }
+        try? FileManager.default.moveItem(at: legacyBlobURL, to: archive)
     }
 
     /// Re-seals a pre-1.0 vault with each file bound to its role. Payloads
@@ -117,14 +141,17 @@ final class EncryptedStorage {
             do {
                 try writeSealed(data, to: url, role: Self.payloadRole(for: item.id))
             } catch {
-                return .unreadable(error)
+                // Stop before the index. Leaving it unbound means the next launch
+                // repeats the upgrade; writing it now would strand this payload,
+                // which would then only ever read as missing.
+                return .loadedButUnwritable(state, error)
             }
         }
         do {
             try saveIndex(state)
             return .loaded(state)
         } catch {
-            return .unreadable(error)
+            return .loadedButUnwritable(state, error)
         }
     }
 
@@ -210,6 +237,9 @@ final class EncryptedStorage {
     static func payloadRole(for id: UUID) -> Data {
         Data("clipvelope/payload/v1/\(id.uuidString)".utf8)
     }
+
+    /// The retired pre-schema-4 blob, kept only as a recovery copy.
+    static let archiveRole = Data("clipvelope/archive/v1".utf8)
 
     private func writeSealed(_ plaintext: Data, to url: URL, role: Data) throws {
         let sealed = try AES.GCM.seal(plaintext, using: try keyStore.getOrCreateKey(),
