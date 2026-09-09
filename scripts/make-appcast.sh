@@ -80,8 +80,19 @@ EOF
     echo "release notes for $ver -> $notes"
 done
 
+# Sparkle needs an absolute URL for the download, or it has nothing to fetch.
+# GitHub serves a release asset at <repo>/releases/download/<tag>/<file>, and the
+# tag for a release is v<version>, so the prefix is derived from the feed URL and
+# the version rather than written down twice. Override it when the downloads live
+# somewhere else.
+version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+feed=$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' Resources/Info.plist)
+repo=${feed%/releases/*}
+PREFIX="${CLIPVELOPE_DOWNLOAD_PREFIX:-$repo/releases/download/v$version/}"
+
 echo "signing updates (macOS may ask for keychain access to the Sparkle key) ..."
-"$TOOL" --embed-release-notes dist/
+echo "downloads will be advertised under $PREFIX"
+"$TOOL" --embed-release-notes --download-url-prefix "$PREFIX" dist/
 
 if [ ! -f dist/appcast.xml ]; then
     echo "error: no appcast.xml was produced" >&2
