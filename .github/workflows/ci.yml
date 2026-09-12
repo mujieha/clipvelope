@@ -170,6 +170,9 @@ jobs:
           plist="$APP/Contents/Info.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "com.mujieha.Clipvelope"
+          # One deletion from being lost, and its absence is invisible until a
+          # user has two copies running and fighting over the global hotkeys.
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMultipleInstancesProhibited' "$plist")" = "true"
 
           # The icon is compiled from Resources/Clipvelope.icon by bundle.sh. A
           # mismatch between Info.plist and the files shows up as a blank generic
