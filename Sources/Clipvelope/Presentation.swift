@@ -107,10 +107,16 @@ struct PanelModel: Equatable {
         case close
     }
 
+    /// Folded search. `range(of:options:)` compares in place, so the cost is the
+    /// length of the query rather than a fresh lowercased copy of every stored
+    /// string -- the history holds up to 200 entries of up to 2 MB each, and this
+    /// runs on the main thread on every keystroke. Diacritics are folded too, so
+    /// `resume` finds `résumé`.
     func matches(in items: [ClipboardItem]) -> [ClipboardItem] {
         if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return items }
-        let q = query.lowercased()
-        return items.filter { $0.searchText.lowercased().contains(q) }
+        return items.filter {
+            $0.searchText.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
     }
 
     /// Rows in the order they are drawn: pinned first, then by time section.
@@ -137,12 +143,18 @@ struct PanelModel: Equatable {
 
     /// Completes the search from the newest text entry that starts with it.
     /// Only text entries: an image cannot be typed into a search field.
+    ///
+    /// Only as many characters as the query has are ever compared; a stored
+    /// entry is never folded in full to test a three-letter prefix. `prefix(_:)`
+    /// and `count` both measure Characters, so they agree on what "as long as
+    /// the query" means, and a candidate shorter than the query simply fails to
+    /// compare equal.
     func suggestion(in items: [ClipboardItem]) -> String? {
         guard !query.isEmpty else { return nil }
-        let q = query.lowercased()
         return items.first { item in
             guard case .text(let value) = item.content else { return false }
-            return value.lowercased().hasPrefix(q)
+            return value.prefix(query.count)
+                .compare(query, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
         }?.searchText
     }
 
