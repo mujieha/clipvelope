@@ -57,24 +57,72 @@ final class ClipboardMonitor {
     static let maxTextBytes = 2 * 1024 * 1024
 
     private var timer: Timer?
+    /// The interval the installed timer was built with, so a tick can tell
+    /// whether the rate the policy now asks for is a different one.
+    private var scheduledInterval: TimeInterval?
     private var lastChangeCount: Int = NSPasteboard.general.changeCount
+    /// When the pasteboard last actually changed, which is what the back-off
+    /// schedule is a function of.
+    private var lastChangeAt = Date()
     var onNewContent: ((CapturedItem) -> Void)?
 
+    /// Pausing keeps polling and keeps advancing `lastChangeCount`, so that
+    /// resuming does not capture whatever was copied while paused.
+    ///
+    /// It deliberately gets no third, slower rate of its own. The poll is the
+    /// only thing that advances `lastChangeCount`, so the interval is exactly
+    /// the width of the window in which something copied just before the user
+    /// resumes is still unseen -- and therefore captured on resume, which is
+    /// the one thing pausing promises not to do. Backing off further while
+    /// paused would widen that window to buy wakeups back only while the
+    /// feature is switched off.
     var isPaused = false
     var skipConcealed = true
     var ignoredBundleIDs: Set<String> = []
 
     func start() {
         guard timer == nil else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
-            self?.checkPasteboard()
-        }
-        RunLoop.main.add(timer!, forMode: .common)
+        // Start in the active window: the app has just launched, the user is at
+        // the machine, and the first seconds are when a capture is most likely
+        // to be waited on.
+        lastChangeAt = Date()
+        schedule(interval: PollingPolicy.interval(sinceLastChange: 0))
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        scheduledInterval = nil
+    }
+
+    /// Installs the repeating poll at `interval`, replacing whatever was there.
+    /// The one place a timer is created, so `start()` and the back-off path
+    /// cannot disagree or leave two of them running.
+    private func schedule(interval: TimeInterval) {
+        timer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        // .common so the poll keeps firing while a menu is tracking; in the
+        // default mode alone, opening the menu bar item would stop capture.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        scheduledInterval = interval
+    }
+
+    /// Poll, then re-rate. Rescheduling rather than deciding to do nothing on
+    /// each tick is the whole point: a 0.6 s timer that wakes up to skip its own
+    /// body is exactly the wakeup the back-off is meant to remove.
+    private func tick() {
+        checkPasteboard()
+        // checkPasteboard can reach the app through onNewContent, which may have
+        // stopped the monitor; do not resurrect a timer it just invalidated.
+        guard timer != nil else { return }
+
+        let wanted = PollingPolicy.interval(sinceLastChange: Date().timeIntervalSince(lastChangeAt))
+        if wanted != scheduledInterval {
+            schedule(interval: wanted)
+        }
     }
 
     private func checkPasteboard() {
@@ -83,6 +131,10 @@ final class ClipboardMonitor {
         // is not re-examined on the next tick.
         if pb.changeCount == lastChangeCount { return }
         lastChangeCount = pb.changeCount
+        // Stamped before the pause check, and before any policy or size rule can
+        // refuse the item: the schedule is a function of pasteboard activity,
+        // not of what was kept. Somebody copying passwords is at the keyboard.
+        lastChangeAt = Date()
 
         if isPaused { return }
 

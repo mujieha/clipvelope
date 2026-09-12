@@ -101,3 +101,47 @@ enum CapturePolicy {
         return true
     }
 }
+
+// MARK: - Polling Policy
+
+/// How often the pasteboard is polled. macOS has no notification for pasteboard
+/// changes, so polling is the only mechanism; what this decides is the rate.
+///
+/// Two rates, not a ramp. A ramp would be more code and more test surface for
+/// nothing the user can perceive: the whole span it would interpolate across is
+/// already under the time it takes a person to copy something and reach for the
+/// panel.
+enum PollingPolicy {
+    /// The rate while the user is plainly copying things. This is what the
+    /// monitor did at every moment before back-off existed, and nobody has
+    /// reported a missed or late capture at it, so it is left alone.
+    static let active: TimeInterval = 0.6
+
+    /// The rate at rest. Chosen as the largest delay that is still invisible:
+    /// even by keyboard, copying something and then opening the panel takes
+    /// longer than this, and the first poll after a change snaps the rate back
+    /// to `active`, so a burst of copying is polled quickly from its second
+    /// item on. It cuts wakeups from 100 a minute to 24 -- a 76 per cent
+    /// reduction over an idle hour, which is the case this exists for.
+    static let idle: TimeInterval = 2.5
+
+    /// How long after the last change the poll stays at its quickest. Fifteen
+    /// seconds covers a normal copy-paste-copy rhythm without holding the fast
+    /// rate open on a Mac whose owner has walked away.
+    static let activeWindow: TimeInterval = 15
+
+    /// The polling interval for a pasteboard last changed `sinceLastChange`
+    /// seconds ago.
+    ///
+    /// The boundary falls on the idle side: exactly at `activeWindow` the
+    /// window has elapsed. A negative argument -- the wall clock moving
+    /// backwards under an NTP correction or a timezone change -- reads as
+    /// "changed even more recently than now" and yields the active rate, which
+    /// is the safe direction: the worst case is a few seconds of quick polling,
+    /// where treating it as idle could delay a capture the user is waiting for.
+    /// The result is always one of the two constants, so it can never fall
+    /// outside `active...idle`.
+    static func interval(sinceLastChange: TimeInterval) -> TimeInterval {
+        sinceLastChange < activeWindow ? active : idle
+    }
+}

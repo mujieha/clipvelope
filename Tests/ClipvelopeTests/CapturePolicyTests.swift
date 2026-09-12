@@ -59,3 +59,67 @@ final class CapturePolicyTests: XCTestCase {
         XCTAssertTrue(shouldCapture(source: nil, ignored: ["com.1password.1password"]))
     }
 }
+
+// The back-off schedule is a pure function precisely so it can be pinned here:
+// the monitor that installs it owns a real Timer and the real pasteboard, so the
+// rescheduling itself is checked by running the app, not by a unit test.
+final class PollingPolicyTests: XCTestCase {
+    private let active = PollingPolicy.active
+    private let idle = PollingPolicy.idle
+    private let window = PollingPolicy.activeWindow
+
+    func testJustAfterAChangeThePollIsAtItsQuickest() {
+        XCTAssertEqual(PollingPolicy.interval(sinceLastChange: 0), active)
+        XCTAssertEqual(PollingPolicy.interval(sinceLastChange: 1), active)
+    }
+
+    func testInsideTheWindowThePollStaysQuick() {
+        XCTAssertEqual(PollingPolicy.interval(sinceLastChange: window - 0.001), active)
+    }
+
+    // Pinning which side the boundary falls on: at exactly the window, it has
+    // elapsed, so the rate is already the idle one.
+    func testTheBoundaryItselfIsIdle() {
+        XCTAssertEqual(PollingPolicy.interval(sinceLastChange: window), idle)
+    }
+
+    func testPastTheWindowThePollBacksOff() {
+        XCTAssertEqual(PollingPolicy.interval(sinceLastChange: window + 0.001), idle)
+        XCTAssertEqual(PollingPolicy.interval(sinceLastChange: 60), idle)
+    }
+
+    // An hour, a day and a week idle are the case the back-off exists for.
+    func testFarPastTheWindowItDoesNotDriftFurther() {
+        XCTAssertEqual(PollingPolicy.interval(sinceLastChange: 3600), idle)
+        XCTAssertEqual(PollingPolicy.interval(sinceLastChange: 86_400), idle)
+        XCTAssertEqual(PollingPolicy.interval(sinceLastChange: 604_800), idle)
+    }
+
+    // The wall clock moves backwards under an NTP correction or a timezone
+    // change, so a negative age is reachable. Quick polling is the safe answer.
+    func testANegativeAgePollsQuicklyRatherThanAbsurdly() {
+        for age in [-0.001, -1, -3600, -86_400] as [TimeInterval] {
+            XCTAssertEqual(PollingPolicy.interval(sinceLastChange: age), active,
+                           "a \(age)s age should read as a recent change")
+        }
+    }
+
+    // The monitor installs whatever this returns straight onto a Timer, so a
+    // value outside the two rates would be a real bug: zero or a negative
+    // interval spins the run loop, and a huge one stops capture entirely.
+    func testTheIntervalIsNeverOutsideTheTwoRates() {
+        let ages: [TimeInterval] = [-604_800, -60, -0.5, 0, 0.5, 14.999, 15, 15.001,
+                                    30, 3600, 86_400, .greatestFiniteMagnitude, .infinity]
+        for age in ages {
+            let interval = PollingPolicy.interval(sinceLastChange: age)
+            XCTAssertGreaterThanOrEqual(interval, active, "age \(age)")
+            XCTAssertLessThanOrEqual(interval, idle, "age \(age)")
+        }
+    }
+
+    func testTheRatesAreOrderedAndUsable() {
+        XCTAssertGreaterThan(active, 0)
+        XCTAssertGreaterThan(idle, active)
+        XCTAssertGreaterThan(window, 0)
+    }
+}
