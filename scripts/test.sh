@@ -9,24 +9,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-has_xctest() {
-    [ -d "$1/Platforms/MacOSX.platform/Developer/Library/Frameworks/XCTest.framework" ]
-}
-
-if [ -z "${DEVELOPER_DIR:-}" ] && ! has_xctest "$(xcode-select -p)"; then
-    for candidate in /Applications/Xcode.app /Applications/Xcode_*.app /Applications/Xcode*.app; do
-        [ -d "$candidate" ] || continue
-        if has_xctest "$candidate/Contents/Developer"; then
-            export DEVELOPER_DIR="$candidate/Contents/Developer"
-            echo "using $DEVELOPER_DIR for XCTest"
-            break
-        fi
-    done
-fi
-
-if [ -z "${DEVELOPER_DIR:-}" ] && ! has_xctest "$(xcode-select -p)"; then
-    echo "error: no Xcode with XCTest found. Install Xcode, or set DEVELOPER_DIR." >&2
-    exit 1
-fi
+. "$(dirname "$0")/select-xcode.sh"
 
 exec swift test "$@"
