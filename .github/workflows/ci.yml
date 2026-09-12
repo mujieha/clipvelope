@@ -22,7 +22,13 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      # Full history and tags: "Build number is ahead of the last release"
+      # compares against the most recent release tag, and the default shallow
+      # checkout fetches neither.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Toolchain
         run: |
@@ -58,6 +64,42 @@ jobs:
           set -euo pipefail
           ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
           grep -q "^## $ver" CHANGELOG.md || { echo "CHANGELOG.md has no '## $ver' section"; exit 1; }
+
+      # Sparkle compares CFBundleVersion, not the version string. A release that
+      # bumps the version and leaves the build number alone is never offered to
+      # anyone running the previous one, and Sparkle fails silently -- their app
+      # goes on looking current. Only this one check of `make preflight` runs
+      # here; dist/ and the working tree are meaningless on a runner.
+      - name: Build number is ahead of the last release
+        run: |
+          set -euo pipefail
+          tag=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$tag" ]; then
+            echo "no release tag in this clone; nothing to compare against"
+            exit 0
+          fi
+          tmp=$(mktemp)
+          trap 'rm -f "$tmp"' EXIT
+          git show "$tag:Resources/Info.plist" > "$tmp"
+          ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+          build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Resources/Info.plist)
+          tagged_ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$tmp")
+          tagged_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$tmp")
+          echo "$tag shipped $tagged_ver (build $tagged_build); this tree is $ver (build $build)"
+          if [ "$ver" = "$tagged_ver" ]; then
+            echo "the version has not been bumped since $tag; nothing to check"
+            exit 0
+          fi
+          case "$build" in
+            ''|*[!0-9]*) echo "CFBundleVersion '$build' is not an integer"; exit 1 ;;
+          esac
+          case "$tagged_build" in
+            ''|*[!0-9]*) echo "$tag shipped CFBundleVersion '$tagged_build', not an integer"; exit 1 ;;
+          esac
+          if [ "$build" -le "$tagged_build" ]; then
+            echo "CFBundleVersion $build must be greater than $tagged_build, which $tag shipped"
+            exit 1
+          fi
 
       # Deliberately not SwiftLint or SwiftFormat. Those need a toolchain
       # dependency and mostly produce style opinions; the compiler already runs

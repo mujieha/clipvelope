@@ -27,12 +27,36 @@ to them.
 ## Commands
 
 ```bash
+make preflight                                    # read-only; refuses a tree that is not ready
 CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" make release
 make notarize TARGET=dist/Clipvelope.app          # staple the app first
 make dmg                                          # image now holds a stapled app
 make notarize TARGET=dist/Clipvelope-<version>.dmg
 make appcast
 ```
+
+`make preflight` reads the tree and refuses a release it is not ready for. It
+runs every check and reports all of them rather than stopping at the first:
+
+- `Package.swift`'s platform version and `LSMinimumSystemVersion` agree.
+- `CHANGELOG.md` has a `## <version>` section and that section is not empty.
+- `CFBundleVersion` is an integer and is strictly greater than the one the most
+  recent `v*` tag shipped. Skipped, not failed, while the version string is
+  still the tagged one — that is the normal state between releases.
+- `SUPublicEDKey` and `SUFeedURL` are set.
+- `dist/` holds at most one `.dmg`, and its filename version matches the tree.
+  Two images is the trap that nearly signed a stale 0.1.0 into the feed.
+- The working tree has no uncommitted changes to tracked files, so the build can
+  be reproduced. `PREFLIGHT_ALLOW_DIRTY=1` waives this one, and only this one.
+
+CI runs the build-number check on its own, after the changelog check, because
+`dist/` and the working tree mean nothing on a runner. It is skipped when the
+clone has no tags, so a fork still passes.
+
+Why the build number matters more than it looks: Sparkle compares
+`CFBundleVersion`, not `CFBundleShortVersionString`. A 0.2.0 built with the
+build number still at `1` is never offered to anyone running 0.1.0, and Sparkle
+reports nothing at all — their copy simply goes on looking current.
 
 `make release` builds with the updater (`CLIPVELOPE_SPARKLE=1`), signs every
 executable in the bundle with the hardened runtime and a secure timestamp,
@@ -106,13 +130,16 @@ feed. `Clipvelope --status` reports whether the feed answers with an appcast.
 ## Checklist
 
 1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`.
+   `CFBundleVersion` must go up, or the update reaches nobody.
 2. Add the `## <version>` section to `CHANGELOG.md`; CI refuses a version without one.
 3. `make check && make test`.
-4. `make release`, then notarize the app, rebuild the image, notarize the image,
+4. Commit, then `make preflight`. It must print `ready to release`; it checks the
+   working tree is clean, so run it after the commit and not before.
+5. `make release`, then notarize the app, rebuild the image, notarize the image,
    then the quarantined check above. Notarizing the app before the image is
    built is what lets a first launch succeed with no network: the app carries
    its own ticket instead of having to ask Apple.
-5. `make appcast`, publish the DMG and the appcast together.
+6. `make appcast`, publish the DMG and the appcast together.
 
 ## The vault across updates
 

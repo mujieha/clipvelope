@@ -1,4 +1,4 @@
-.PHONY: build test app run clean icon check xcodeproj dmg notarize release appcast smoke
+.PHONY: build test app run clean icon check preflight xcodeproj dmg notarize release appcast smoke
 
 build:
 	swift build
@@ -10,6 +10,11 @@ test:
 check:
 	./scripts/check-workflows.sh
 	plutil -lint Resources/Info.plist Resources/Clipvelope.entitlements
+
+# Read-only. Refuses a release whose version, changelog, build number or dist/
+# contents are wrong. Run it before `make release`.
+preflight:
+	./scripts/preflight.sh
 
 app:
 	./scripts/bundle.sh
@@ -35,6 +40,8 @@ dmg:
 
 # A build with the updater. Needs a real Apple identity: macOS will not load an
 # embedded framework into an ad-hoc signed process.
+#
+# The release recipe is: preflight, release, notarize, appcast.
 release:
 	CLIPVELOPE_SPARKLE=1 ./scripts/bundle.sh
 	CLIPVELOPE_SPARKLE=1 SKIP_BUILD=yes ./scripts/make-dmg.sh
