@@ -221,31 +221,92 @@ final class PanelHostView: NSView {
 }
 
 enum PanelOpener {
+    /// What can be said about the menu bar item, which is the app's only entry
+    /// point: ⌃⌥V and `--open` both press it.
+    ///
+    /// Three cases, not two. Before SwiftUI starts there is no status item and
+    /// no way to look for one, so answering "not found" there would report a
+    /// fault that has not happened. `--status` runs in exactly that process.
+    enum Availability: Equatable {
+        case found
+        case missing
+        /// Nobody looked, because there was nothing yet to look at.
+        case notChecked
+
+        /// The `--status` line. The three cases must read differently from one
+        /// another: a word that sounds like a working app is a lie in the two
+        /// cases where nothing was pressed.
+        var summary: String {
+            switch self {
+            case .found:
+                return "found"
+            case .missing:
+                return "NOT FOUND - the shortcut cannot open the history"
+            case .notChecked:
+                return "not checked (--status exits before the UI starts)"
+            }
+        }
+    }
+
+    /// Whether the menu bar item could be pressed right now.
+    static var availability: Availability {
+        // NSApp is created by SwiftUI, and isRunning turns true only once the
+        // run loop is going. --status returns before either, so in that process
+        // there is nothing to look at rather than nothing to find.
+        guard let app = NSApp, app.isRunning else { return .notChecked }
+        return statusItemButton() == nil ? .missing : .found
+    }
+
     /// Presses the menu bar item the way a click would, which is the only way to
     /// open a MenuBarExtra window from code. Pressing it while open closes it.
     @discardableResult
     static func toggle() -> Bool {
-        for window in NSApp.windows where window.className == "NSStatusBarWindow" {
-            if let button = statusButton(in: window.contentView) {
-                button.performClick(nil)
-                return true
-            }
+        guard let button = statusItemButton() else {
+            NSLog("Clipvelope: menu bar item not found, cannot open the history")
+            return false
         }
-        NSLog("Clipvelope: menu bar item not found, cannot open the history")
-        return false
+        button.performClick(nil)
+        return true
     }
 
     static func open() {
         if !PanelState.isOpen { toggle() }
     }
 
-    private static func statusButton(in view: NSView?) -> NSStatusBarButton? {
-        guard let view else { return nil }
-        if let button = view as? NSStatusBarButton { return button }
-        for subview in view.subviews {
-            if let button = statusButton(in: subview) { return button }
+    /// This app's status item button.
+    ///
+    /// Found by type, not by the containing window's class name. It used to
+    /// search only windows whose className was "NSStatusBarWindow", which is
+    /// private: the day AppKit renames it, ⌃⌥V -- how essentially everyone
+    /// opens this app -- stops working, and the only trace is one line in the
+    /// system log. NSStatusBarButton is public API, and is the thing that
+    /// actually has to be clicked, so it is the thing to look for.
+    ///
+    /// This process has exactly one status item, because the app declares
+    /// exactly one MenuBarExtra. Every window is searched and every hit
+    /// collected so that "more than one" is noticed rather than silently
+    /// picked over: it would mean the assumption above stopped holding.
+    private static func statusItemButton() -> NSStatusBarButton? {
+        var found: [NSStatusBarButton] = []
+        for window in NSApp?.windows ?? [] {
+            collectStatusButtons(in: window.contentView, into: &found)
         }
-        return nil
+        if found.count > 1 {
+            NSLog("%@", "Clipvelope: expected one menu bar item, found \(found.count); pressing the first")
+        }
+        return found.first
+    }
+
+    private static func collectStatusButtons(in view: NSView?,
+                                             into found: inout [NSStatusBarButton]) {
+        guard let view else { return }
+        if let button = view as? NSStatusBarButton {
+            found.append(button)
+            return
+        }
+        for subview in view.subviews {
+            collectStatusButtons(in: subview, into: &found)
+        }
     }
 }
 
