@@ -138,6 +138,60 @@ final class PanelModelTests: XCTestCase {
         XCTAssertEqual(PanelModel().visibleItems(in: items, now: now, calendar: calendar).count, 50)
     }
 
+    func testNothingIsHiddenWhileTheHistoryFitsInThePanel() {
+        let items = (0..<(PanelModel.maxVisibleRows - 1)).map { item("row \($0)") }
+        XCTAssertEqual(PanelModel().hiddenCount(in: items), 0)
+        XCTAssertNil(PanelModel().overflowNotice(in: items))
+    }
+
+    func testNothingIsHiddenAtExactlyTheRowCap() {
+        let items = (0..<PanelModel.maxVisibleRows).map { item("row \($0)") }
+        XCTAssertEqual(PanelModel().hiddenCount(in: items), 0)
+        XCTAssertNil(PanelModel().overflowNotice(in: items))
+    }
+
+    func testTheHiddenCountIsEverythingPastTheRowCap() {
+        let total = PanelModel.maxVisibleRows + 123
+        let items = (0..<total).map { item("row \($0)") }
+        XCTAssertEqual(PanelModel().hiddenCount(in: items), 123)
+        XCTAssertEqual(PanelModel().overflowNotice(in: items),
+                       "\(PanelModel.maxVisibleRows) of \(total) shown. Type to search the rest.")
+    }
+
+    func testHiddenMatchesAreCountedNotHiddenItems() {
+        var items = (0..<PanelModel.maxVisibleRows).map { item("row \($0)") }
+        items += (0..<20).map { item("needle \($0)") }
+        var panel = PanelModel()
+        panel.setQuery("needle")
+        // The history overflows the panel; the matches do not, so nothing the
+        // user is looking at is missing.
+        XCTAssertEqual(panel.hiddenCount(in: items), 0)
+        XCTAssertNil(panel.overflowNotice(in: items))
+    }
+
+    func testASearchThatStillOverflowsCountsItsOwnMatches() {
+        let matching = PanelModel.maxVisibleRows + 41
+        var items = (matching..<(matching + 30)).map { item("row \($0)") }
+        items += (0..<matching).map { item("needle \($0)") }
+        var panel = PanelModel()
+        panel.setQuery("needle")
+        XCTAssertEqual(panel.hiddenCount(in: items), 41)
+        XCTAssertEqual(panel.overflowNotice(in: items),
+                       "\(PanelModel.maxVisibleRows) of \(matching) matches shown. Keep typing to narrow it.")
+    }
+
+    func testOverflowLeavesTheDrawnRowsAndTheSelectionAlone() {
+        let items = (0..<(PanelModel.maxVisibleRows + 123)).map { item("row \($0)") }
+        var panel = PanelModel()
+        let visible = panel.visibleItems(in: items, now: now, calendar: calendar)
+        XCTAssertEqual(visible.count, PanelModel.maxVisibleRows)
+        // The hint is not a row: Down at the last real row must stay there.
+        panel.move(PanelModel.maxVisibleRows, rowCount: visible.count)
+        XCTAssertEqual(panel.selection, PanelModel.maxVisibleRows - 1)
+        panel.move(1, rowCount: visible.count)
+        XCTAssertEqual(panel.selection, PanelModel.maxVisibleRows - 1)
+    }
+
     func testMoveClampsToTheEnds() {
         var panel = PanelModel()
         panel.move(-1, rowCount: 3)

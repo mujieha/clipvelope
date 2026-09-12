@@ -393,6 +393,25 @@ private struct SectionLabel: View {
     }
 }
 
+/// The last line of the list when the history is longer than the panel draws.
+/// Deliberately not a `HistoryRow`: it is not selectable, not copyable, and
+/// takes no ⌘-number, because it is a statement about the list rather than a
+/// part of it.
+private struct OverflowLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 3)
+    }
+}
+
 // MARK: - State strip
 
 /// One line that says what the vault is doing right now. It replaces a stack
@@ -447,6 +466,9 @@ struct ClipboardMenuView: View {
     private var groups: [HistorySection.Group] { panel.groups(in: store.items) }
     private var visibleItems: [ClipboardItem] { groups.flatMap(\.items) }
     private var autocompleteSuggestion: String? { panel.suggestion(in: store.items) }
+    /// Nil unless the list stops short of what matches. It is drawn after the
+    /// last row and is not one of `visibleItems`, so it takes no selection.
+    private var overflowNotice: String? { panel.overflowNotice(in: store.items) }
 
     private var queryBinding: Binding<String> {
         Binding(get: { panel.query }, set: { panel.setQuery($0) })
@@ -557,6 +579,9 @@ struct ClipboardMenuView: View {
                     }
                     .id(item.id)
                 }
+            }
+            if let notice = overflowNotice {
+                OverflowLabel(text: notice)
             }
             Color.clear.frame(height: 6)
         }
