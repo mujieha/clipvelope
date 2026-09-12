@@ -355,13 +355,22 @@ final class ClipboardStore: ObservableObject {
         switch payload {
         case .text(let value):
             content = .text(value)
+        // The digest is taken here, the one place the payload bytes are already
+        // in hand, and never recomputed afterwards: hashing an item that is
+        // already in the vault would mean reading and decrypting its payload
+        // file, and doing that for the whole history at launch is exactly the
+        // cost the per-item payload layout exists to avoid. Entries written
+        // before this field existed keep a nil hash for good; see
+        // `ClipboardContent.ImageInfo.==` for how they de-duplicate.
         case .richText(let data, let plain, let type):
             content = .richText(.init(plainText: plain, byteCount: data.count,
-                                      typeIdentifier: type))
+                                      typeIdentifier: type,
+                                      contentHash: ClipboardContent.digest(data)))
             payloadBytes = data
         case .image(let data, let type, let width, let height):
             content = .image(.init(pixelWidth: width, pixelHeight: height,
-                                   byteCount: data.count, typeIdentifier: type))
+                                   byteCount: data.count, typeIdentifier: type,
+                                   contentHash: ClipboardContent.digest(data)))
             payloadBytes = data
         case .files(let urls):
             content = .files(urls.map { .init(path: $0.path) })
@@ -829,22 +838,40 @@ final class ClipboardStore: ObservableObject {
 
     /// Whether a payload out of a backup is really the thing its item claims,
     /// and stays inside the limits capture enforces.
+    ///
+    /// A declared `contentHash` is part of that claim, and the strongest part of
+    /// it: everything else an item says about its payload is a property many
+    /// different payloads share, while the digest names one. An item whose hash
+    /// does not match the bytes filed under its id is not describing them, so
+    /// the payload is refused and the caller tells the user which entries went.
+    /// A backup written before the field existed declares no hash and is judged
+    /// exactly as it was before.
     static func payloadIsAcceptable(_ data: Data, for content: ClipboardContent) -> Bool {
         switch content {
-        case .image:
+        case .image(let info):
             guard data.count <= ClipboardMonitor.maxImageBytes,
                   data.starts(with: ClipboardMonitor.pngSignature),
                   let size = ClipboardMonitor.declaredPixelSize(of: data),
-                  ClipboardMonitor.acceptsImage(pixelWidth: size.0, pixelHeight: size.1)
+                  ClipboardMonitor.acceptsImage(pixelWidth: size.0, pixelHeight: size.1),
+                  hashMatches(data, declared: info.contentHash)
             else { return false }
             return true
-        case .richText:
+        case .richText(let info):
             return data.count <= ClipboardMonitor.maxRichTextBytes
+                && hashMatches(data, declared: info.contentHash)
         case .text, .files:
             // Neither keeps a payload file, so a payload claiming to be one is
             // not something this app wrote.
             return false
         }
+    }
+
+    /// True when no hash is declared, or the declared one is these bytes'.
+    /// Case-insensitive because the comparison is of a hex rendering, not of a
+    /// string this app is the only writer of.
+    private static func hashMatches(_ data: Data, declared: String?) -> Bool {
+        guard let declared else { return true }
+        return declared.lowercased() == ClipboardContent.digest(data)
     }
 
     private func importState(from url: URL, password: String?) {

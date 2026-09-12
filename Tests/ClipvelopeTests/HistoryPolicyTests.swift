@@ -108,6 +108,55 @@ final class HistoryPolicyTests: XCTestCase {
         XCTAssertEqual(HistoryPolicy.trimmed(items, maxItems: 1, maxPayloadBytes: 1), items)
     }
 
+    // MARK: - Telling two pictures apart
+
+    private func imageContent(hash: String?) -> ClipboardContent {
+        .image(.init(pixelWidth: 1920, pixelHeight: 1080, byteCount: 40_000,
+                     typeIdentifier: "public.png", contentHash: hash))
+    }
+
+    private func imageItem(hash: String?, at date: Date = Date()) -> ClipboardItem {
+        ClipboardItem(id: UUID(), createdAt: date, isPinned: false,
+                      content: imageContent(hash: hash), sourceBundleID: nil)
+    }
+
+    /// Two screenshots of the same window share their size, type and often their
+    /// compressed byte count. Before the digest, the second was discarded and the
+    /// user was shown the first one's pixels under a fresh timestamp.
+    func testTwoDifferentImagesWithIdenticalMetadataStayTwoEntries() {
+        let first = imageItem(hash: ClipboardContent.digest(compressiblePNG(width: 4, height: 4)))
+        let second = imageContent(hash: ClipboardContent.digest(compressiblePNG(width: 4, height: 5)))
+        let result = HistoryPolicy.inserting(second, into: [first], maxItems: 200)
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(result[0].content, second)
+        XCTAssertEqual(result[1].id, first.id)
+    }
+
+    func testRecopyingTheSameImageStillDeduplicatesAndRefreshesItsTime() {
+        let hash = ClipboardContent.digest(compressiblePNG(width: 4, height: 4))
+        let old = Date(timeIntervalSince1970: 1_000)
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let existing = imageItem(hash: hash, at: old)
+        let result = HistoryPolicy.inserting(imageContent(hash: hash), into: [existing],
+                                             maxItems: 200, now: now)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].id, existing.id)
+        XCTAssertEqual(result[0].createdAt, now)
+    }
+
+    /// The old-vault fallback, and the reason for it: entries already on disk
+    /// have no hash and are never given one, so without this they would each gain
+    /// a duplicate the first time the user re-copied them after upgrading.
+    func testAnImageFromAnOldVaultStillDeduplicatesAgainstItsRecopy() {
+        let legacy = imageItem(hash: nil, at: Date(timeIntervalSince1970: 1_000))
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let recopied = imageContent(hash: ClipboardContent.digest(compressiblePNG(width: 4, height: 4)))
+        let result = HistoryPolicy.inserting(recopied, into: [legacy], maxItems: 200, now: now)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].id, legacy.id)
+        XCTAssertEqual(result[0].createdAt, now)
+    }
+
     func testDifferentContentKindsAreNotTreatedAsDuplicates() {
         let existing = [item("photo.png")]
         let files = ClipboardContent.files([.init(path: "/tmp/photo.png")])
