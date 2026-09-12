@@ -50,6 +50,32 @@ the feed keeps its history, embeds the `## <version>` section of `CHANGELOG.md`
 as the release notes, and writes `dist/appcast.xml`. The first run asks for
 access to the signing key; answer Always Allow.
 
+### Every image is advertised under its own tag
+
+`generate_appcast` takes exactly one `--download-url-prefix` and applies it to
+everything it writes, but the feed carries an item per disk image and each image
+lives under its own release tag. Left alone, the first release with a
+predecessor advertises `Clipvelope-0.1.0.dmg` at `.../download/v0.2.0/…` — a 404
+aimed precisely at the people who have not updated yet, and one Sparkle reports
+as nothing more than a failed check. So `make appcast` rewrites each
+`<enclosure url=…>` from that file's own name after the tool has run. The
+signature beside it covers the disk image's bytes rather than the feed's, so
+rewriting the URL leaves it valid; the script checks that it stayed untouched.
+
+`CLIPVELOPE_DOWNLOAD_PREFIX` still overrides everything, unchanged, for
+downloads hosted somewhere other than GitHub releases — there the operator has
+said where the files are and there is only one place.
+
+Prove the rule without a signing key, a Sparkle build or a disk image:
+
+```bash
+CLIPVELOPE_APPCAST_SELFTEST=1 ./scripts/make-appcast.sh
+```
+
+It prints the URL two made-up releases would get, then rewrites a feed shaped
+like the real one and checks each item came back under its own tag with its
+signature intact.
+
 ## Why the updater is opt-in at build time
 
 macOS loads a framework into a process only when both carry the same Apple team
