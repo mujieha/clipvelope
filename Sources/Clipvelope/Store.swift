@@ -40,6 +40,9 @@ final class ClipboardStore: ObservableObject {
     @Published var captureSuspended: Bool = false { didSet { syncMonitorPolicy() } }
     @Published private(set) var openHotkey: KeyCombo = .defaultOpen
     @Published private(set) var preferencesHotkey: KeyCombo = .defaultPreferences
+    /// Whether choosing an entry also presses Command + V. Off until the user
+    /// turns it on, and `disarming` keeps it that way through an import.
+    @Published var pasteDirectly: Bool = false
     /// False when another app owns the open-history combination, so Preferences
     /// can say so instead of leaving a shortcut that silently does nothing.
     @Published private(set) var openHotkeyRegistered = true
@@ -93,9 +96,11 @@ final class ClipboardStore: ObservableObject {
 
     private static let shellTimeout: TimeInterval = 30
 
-    /// - Parameter enableSystemIntegration: pasteboard polling and global
-    ///   hotkeys. Off in tests, which have no business installing a system-wide
-    ///   hotkey or reacting to whatever the machine's clipboard happens to do.
+    /// - Parameter enableSystemIntegration: pasteboard polling, global hotkeys,
+    ///   and closing the panel or posting a keystroke when pasting for the user.
+    ///   Off in tests, which have no business installing a system-wide hotkey,
+    ///   reacting to whatever the machine's clipboard happens to do, or typing
+    ///   Command + V into whatever is frontmost on the machine running them.
     init(storage: EncryptedStorage = EncryptedStorage(),
          enableSystemIntegration: Bool = true,
          pasteboard: NSPasteboard = .general) {
@@ -239,6 +244,7 @@ final class ClipboardStore: ObservableObject {
         ignoredAppBundleIDs = state.ignoredAppBundleIDs
         captureSuspended = state.captureSuspended
         preferencesHotkey = state.preferencesHotkey
+        pasteDirectly = state.pasteDirectly
         if openHotkey != state.openHotkey {
             openHotkey = state.openHotkey
             registerOpenHotkey()
@@ -264,7 +270,8 @@ final class ClipboardStore: ObservableObject {
             ignoredAppBundleIDs: ignoredAppBundleIDs,
             captureSuspended: captureSuspended,
             openHotkey: openHotkey,
-            preferencesHotkey: preferencesHotkey
+            preferencesHotkey: preferencesHotkey,
+            pasteDirectly: pasteDirectly
         )
     }
 
@@ -277,6 +284,15 @@ final class ClipboardStore: ObservableObject {
 
     func setSkipConcealedContent(_ skip: Bool) {
         skipConcealedContent = skip
+        persistState()
+    }
+
+    /// Turns pasting for the user on or off. Granting Accessibility access is a
+    /// separate step and stays the user's: this only records that they want the
+    /// feature, and `PasteService` reports honestly when the permission is
+    /// missing rather than pasting nothing and saying nothing.
+    func setPasteDirectly(_ on: Bool) {
+        pasteDirectly = on
         persistState()
     }
 
@@ -426,10 +442,25 @@ final class ClipboardStore: ObservableObject {
                                                  maxPayloadBytes: maxPayloadBytes))
     }
 
-    func copyToPasteboard(_ item: ClipboardItem) {
+    /// Puts `item` back on the pasteboard.
+    ///
+    /// `then` runs on the main queue once the pasteboard actually holds the
+    /// entry -- which is *not* when this function returns. An image and a
+    /// formatted paste both have to read their payload off `ioQueue` first, and
+    /// anything that acts on the copy having happened -- pasting it, above all
+    /// -- would otherwise act while the clipboard still held the previous
+    /// entry. Existing callers pass nothing and are unaffected.
+    ///
+    /// It fires on every path that ends with something on the pasteboard,
+    /// including the one where a formatted entry has lost its payload and falls
+    /// back to plain text. The single path it does not fire on is a missing
+    /// image payload, which copies nothing at all and deletes the row instead:
+    /// there is nothing there to paste.
+    func copyToPasteboard(_ item: ClipboardItem, then: (() -> Void)? = nil) {
         switch item.content {
         case .text(let value):
             copyText(value)
+            then?()
 
         case .richText(let info):
             // Put both renderings back, so a rich target keeps the formatting
@@ -441,6 +472,7 @@ final class ClipboardStore: ObservableObject {
                     DispatchQueue.main.async {
                         self.copyText(info.plainText)
                         self.showNotice("The formatting for that entry was missing, so plain text was copied.")
+                        then?()
                     }
                     return
                 }
@@ -450,12 +482,14 @@ final class ClipboardStore: ObservableObject {
                     self.pasteboard.clearContents()
                     self.pasteboard.setData(data, forType: type)
                     self.pasteboard.setString(info.plainText, forType: .string)
+                    then?()
                 }
             }
 
         case .files(let refs):
             pasteboard.clearContents()
             pasteboard.writeObjects(refs.map { URL(fileURLWithPath: $0.path) as NSURL })
+            then?()
 
         case .image:
             // The payload is a file now, so reading it is I/O.
@@ -478,8 +512,92 @@ final class ClipboardStore: ObservableObject {
                 DispatchQueue.main.async {
                     self.pasteboard.clearContents()
                     self.pasteboard.setData(data, forType: .png)
+                    then?()
                 }
             }
+        }
+    }
+
+    /// Copies `item` with any formatting dropped.
+    ///
+    /// For a formatted entry that means the plain rendering already held in the
+    /// index, so the payload file is never read and nothing styled reaches the
+    /// pasteboard -- which is the point: pasting into a document that honours
+    /// RTF should be able to arrive as the document's own text. Every other
+    /// kind of entry has no formatting to drop and is copied exactly as usual.
+    ///
+    /// `then` has the same contract as `copyToPasteboard`'s.
+    func copyPlainText(_ item: ClipboardItem, then: (() -> Void)? = nil) {
+        guard case .richText(let info) = item.content else {
+            return copyToPasteboard(item, then: then)
+        }
+        copyText(info.plainText)
+        then?()
+    }
+
+    // MARK: Paste
+
+    /// Copies `item`, closes the history panel, and -- only if the user has
+    /// turned Paste Directly on -- pastes it into whatever they were doing.
+    ///
+    /// This is what the panel's Return key should call. With the setting off it
+    /// does exactly what choosing an entry has always done: copy, and close.
+    func copyAndMaybePaste(_ item: ClipboardItem) {
+        closePanelThenPaste({ self.copyToPasteboard(item, then: $0) })
+    }
+
+    /// The same, for a "Copy as Plain Text" action on a formatted entry.
+    func copyPlainTextAndMaybePaste(_ item: ClipboardItem) {
+        closePanelThenPaste({ self.copyPlainText(item, then: $0) })
+    }
+
+    /// The shared tail of both: dismiss the panel, run `copy`, and paste when
+    /// the copy has landed.
+    ///
+    /// The order is deliberate. The panel is closed *first*, before the copy,
+    /// because a formatted or image entry takes a trip to `ioQueue` and back
+    /// and the dismissal should be under way during it rather than after it.
+    /// The paste itself is hung off the copy's completion, so it can never
+    /// arrive while the clipboard still holds the previous entry.
+    ///
+    /// Closing the panel is `keyWindow.close()`, the same call the view makes,
+    /// and the wait for focus to come back lives in `PasteService`.
+    ///
+    /// Gated on `systemIntegrationEnabled` for the same reason the pasteboard
+    /// poller and the global hotkeys are: a unit test has no business closing
+    /// windows or posting keystrokes into the machine running it.
+    private func closePanelThenPaste(_ copy: ((() -> Void)?) -> Void) {
+        guard systemIntegrationEnabled else { return copy(nil) }
+        NSApplication.shared.keyWindow?.close()
+        guard pasteDirectly else { return copy(nil) }
+        copy({ [weak self] in
+            PasteService.pasteWhenFocusReturns { outcome in
+                self?.report(outcome)
+            }
+        })
+    }
+
+    /// Three outcomes, three answers.
+    ///
+    /// A paste that worked says nothing, because the text appearing where the
+    /// user was typing is the message. The other two are situations they cannot
+    /// otherwise tell apart -- and the remedy differs: one needs a permission
+    /// granted, the others only need Command + V pressed by hand. Every message
+    /// says the entry *was* copied, because in all three cases it was, and a
+    /// user who thinks the copy failed too would go back and choose it again.
+    private func report(_ outcome: PasteService.Outcome) {
+        switch outcome {
+        case .pasted:
+            break
+        case .notTrusted:
+            showNotice("Clipvelope has not been allowed to paste for you yet. The entry was "
+                       + "copied, so Command + V will paste it. Preferences explains the rest.")
+        case .failed(.noEvent):
+            showNotice("The entry was copied, but the keystroke that pastes it could not be "
+                       + "sent. Press Command + V to paste it.")
+        case .failed(.focusDidNotReturn):
+            showNotice("The entry was copied, but the window you were in did not take focus "
+                       + "back, so nothing was pasted. Press Command + V to paste it.")
         }
     }
 
@@ -766,6 +884,15 @@ final class ClipboardStore: ObservableObject {
         // Shortcuts are this Mac's business, not the backup's.
         state.openHotkey = openHotkey
         state.preferencesHotkey = preferencesHotkey
+
+        // Pasting for the user means synthesising keystrokes into whatever they
+        // are doing, and it is the only feature here that needs Accessibility
+        // access. A backup that could switch it on would be arranging for that
+        // -- silently, on a Mac whose owner never asked for it, and on any Mac
+        // the file reaches. So the imported value is discarded outright and
+        // this Mac's own answer is kept, in both directions: a file may not
+        // turn it on, and may not turn off someone else's.
+        state.pasteDirectly = pasteDirectly
 
         // Where and whether this Mac writes its own backups is the user's
         // choice, not a setting a file gets to carry. A backup asking for

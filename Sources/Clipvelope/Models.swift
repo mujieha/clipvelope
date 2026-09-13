@@ -347,6 +347,11 @@ struct AppState: Codable {
     var captureSuspended: Bool = false
     var openHotkey: KeyCombo = .defaultOpen
     var preferencesHotkey: KeyCombo = .defaultPreferences
+    /// Whether choosing an entry also presses Command + V for the user. Off
+    /// until they say otherwise: it is the one feature that needs Accessibility
+    /// access, and granting that to a clipboard manager is a decision the user
+    /// makes, never one a default or a file makes for them.
+    var pasteDirectly: Bool = false
 
     static let empty = AppState(
         items: [], bindings: [], folders: [],
@@ -375,6 +380,10 @@ extension AppState {
         openHotkey = try c.decodeIfPresent(KeyCombo.self, forKey: .openHotkey) ?? .defaultOpen
         preferencesHotkey = try c.decodeIfPresent(KeyCombo.self, forKey: .preferencesHotkey)
             ?? .defaultPreferences
+        // A vault written by 0.1.0 has no such key, and its absence has to mean
+        // off -- anything else would turn on keystroke synthesis for everyone
+        // who upgrades, which is the opposite of a choice.
+        pasteDirectly = try c.decodeIfPresent(Bool.self, forKey: .pasteDirectly) ?? false
     }
 }
 

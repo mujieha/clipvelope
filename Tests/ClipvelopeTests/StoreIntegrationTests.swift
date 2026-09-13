@@ -25,10 +25,12 @@ final class StoreIntegrationTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func makeStore(_ name: String = "vault", seed: UInt8 = 1) -> ClipboardStore {
+    private func makeStore(_ name: String = "vault", seed: UInt8 = 1,
+                           pasteboard: NSPasteboard = .general) -> ClipboardStore {
         let storage = EncryptedStorage(directory: root.appendingPathComponent(name),
                                        keyStore: FixedKeyStore(seed: seed))
-        let store = ClipboardStore(storage: storage, enableSystemIntegration: false)
+        let store = ClipboardStore(storage: storage, enableSystemIntegration: false,
+                                   pasteboard: pasteboard)
         settle(store)
         return store
     }
@@ -301,6 +303,167 @@ final class StoreIntegrationTests: XCTestCase {
     func testKeyIsolationIsReportedHonestly() {
         XCTAssertEqual(makeStore().isKeyIsolated,
                        KeychainKeyStore.usesDataProtectionKeychain)
+    }
+
+    // MARK: - Pasting for the user
+
+    /// The setting is one more field in the vault, and a vault written by 0.1.0
+    /// has no such field. Its absence has to decode as off: anything else would
+    /// switch on keystroke synthesis for everyone who upgrades.
+    func testPasteDirectlyRoundTripsAndIsOffWhenTheKeyIsAbsent() throws {
+        var state = AppState.empty
+        state.pasteDirectly = true
+        let encoded = try JSONEncoder().encode(state)
+        XCTAssertTrue(try JSONDecoder().decode(AppState.self, from: encoded).pasteDirectly)
+
+        let asWrittenBy010 = Data(#"{"schemaVersion":4,"items":[],"bindings":[],"folders":[]}"#.utf8)
+        let decoded = try JSONDecoder().decode(AppState.self, from: asWrittenBy010)
+        XCTAssertFalse(decoded.pasteDirectly,
+                       "a vault written before the setting existed must not have it on")
+    }
+
+    func testPastingDirectlyIsOffByDefaultAndTheChoicePersists() {
+        let store = makeStore()
+        XCTAssertFalse(store.pasteDirectly, "a fresh vault must not synthesise keystrokes")
+
+        store.setPasteDirectly(true)
+        settle(store)
+        XCTAssertTrue(makeStore().pasteDirectly, "the opt-in must survive a relaunch")
+
+        store.setPasteDirectly(false)
+        settle(store)
+        XCTAssertFalse(makeStore().pasteDirectly)
+    }
+
+    /// The security-relevant one. A portable backup is a file anyone can send,
+    /// and one that could switch this on would be arranging for the Mac that
+    /// opens it to type into whatever its owner happens to be doing.
+    func testAPortableBackupCannotTurnPastingDirectlyOn() {
+        let source = makeStore("source", seed: 1)
+        source.setPasteDirectly(true)
+        source.add(text: "portable entry")
+        settle(source)
+
+        let backup = root.appendingPathComponent("portable.cvb")
+        source.exportBackup(to: backup, password: "correct horse")
+        settle(source)
+
+        // seed 2: a different Keychain key, i.e. a different Mac.
+        let destination = makeStore("destination", seed: 2)
+        XCTAssertFalse(destination.pasteDirectly)
+
+        destination.importBackup(from: backup, password: "correct horse")
+        settle(destination)
+
+        XCTAssertEqual(destination.items.map(\.searchText), ["portable entry"],
+                       "the entries themselves still import")
+        XCTAssertFalse(destination.pasteDirectly,
+                       "a file must not be able to switch on keystroke synthesis")
+        XCTAssertFalse(makeStore("destination", seed: 2).pasteDirectly,
+                       "and must not have left it on in the vault either")
+    }
+
+    /// The same rule in the other direction: the imported value is discarded,
+    /// so a file cannot revoke a choice the user made on this Mac.
+    func testAPortableBackupCannotTurnPastingDirectlyOff() {
+        let source = makeStore("source", seed: 1)
+        source.add(text: "portable entry")
+        settle(source)
+        XCTAssertFalse(source.pasteDirectly)
+
+        let backup = root.appendingPathComponent("portable.cvb")
+        source.exportBackup(to: backup, password: "correct horse")
+        settle(source)
+
+        let destination = makeStore("destination", seed: 2)
+        destination.setPasteDirectly(true)
+        settle(destination)
+
+        destination.importBackup(from: backup, password: "correct horse")
+        settle(destination)
+
+        XCTAssertTrue(destination.pasteDirectly,
+                      "a file must not be able to undo a permission decision made here")
+    }
+
+    /// A keychain-mode backup can only have been written by this Mac, so it
+    /// restores unchanged -- otherwise reinstalling would silently drop the
+    /// setting and the feature would look broken.
+    func testAKeychainBackupRestoresPastingDirectly() {
+        let source = makeStore("source")
+        source.setPasteDirectly(true)
+        source.add(text: "device bound")
+        settle(source)
+
+        let backup = root.appendingPathComponent("keychain.cvb")
+        source.exportBackup(to: backup, password: nil)
+        settle(source)
+
+        let destination = makeStore("destination")
+        XCTAssertFalse(destination.pasteDirectly)
+
+        destination.importBackup(from: backup, password: nil)
+        settle(destination)
+
+        XCTAssertTrue(destination.pasteDirectly)
+    }
+
+    /// "Copy as plain text" must not go near the payload file: the plain
+    /// rendering it needs is already in the index. That it completes before the
+    /// call returns is the proof -- a payload read is a round trip through the
+    /// I/O queue and could not possibly have finished by then.
+    func testCopyPlainTextUsesTheIndexAndNeverReadsThePayload() {
+        let pb = NSPasteboard(name: NSPasteboard.Name("clipvelope-plain-\(UUID().uuidString)"))
+        defer { pb.releaseGlobally() }
+        let store = makeStore(pasteboard: pb)
+
+        let rtf = Data("{\\rtf1 bold}".utf8)
+        store.add(.richText(data: rtf, plainText: "bold", typeIdentifier: "public.rtf"))
+        settle(store)
+        let item = store.items.first { $0.searchText == "bold" }!
+
+        pb.clearContents()
+        var finished = false
+        store.copyPlainText(item, then: { finished = true })
+
+        XCTAssertTrue(finished, "nothing was read from disk, so the copy finished on the spot")
+        XCTAssertEqual(pb.string(forType: .string), "bold")
+        XCTAssertNil(pb.data(forType: .rtf), "the formatting must not come along")
+    }
+
+    /// The completion is what a paste hangs off, so it has to fire only once the
+    /// pasteboard really holds the entry -- on the synchronous text path, and on
+    /// the formatted path, which reads its payload off the I/O queue first. A
+    /// paste posted before that read landed would paste the previous clipboard.
+    func testCopyCompletionFiresOnlyOnceThePasteboardHoldsTheEntry() {
+        let pb = NSPasteboard(name: NSPasteboard.Name("clipvelope-copy-\(UUID().uuidString)"))
+        defer { pb.releaseGlobally() }
+        let store = makeStore(pasteboard: pb)
+
+        store.add(text: "plain entry")
+        let rtf = Data("{\\rtf1 styled}".utf8)
+        store.add(.richText(data: rtf, plainText: "styled", typeIdentifier: "public.rtf"))
+        settle(store)
+
+        let text = store.items.first { $0.searchText == "plain entry" }!
+        pb.clearContents()
+        var seenByCompletion: String?
+        store.copyToPasteboard(text, then: { seenByCompletion = pb.string(forType: .string) })
+        XCTAssertEqual(seenByCompletion, "plain entry")
+
+        let rich = store.items.first { $0.searchText == "styled" }!
+        pb.clearContents()
+        var seenRTF: Data?
+        var seenPlain: String?
+        store.copyToPasteboard(rich, then: {
+            seenRTF = pb.data(forType: .rtf)
+            seenPlain = pb.string(forType: .string)
+        })
+        XCTAssertNil(seenRTF, "the formatted path reads its payload first, so it cannot be done yet")
+
+        settle(store)
+        XCTAssertEqual(seenRTF, rtf, "and when it is done, the pasteboard already holds the entry")
+        XCTAssertEqual(seenPlain, "styled")
     }
 
     func testIgnoredAppsPersistAndDeduplicate() {
