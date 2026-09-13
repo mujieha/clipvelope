@@ -9,7 +9,8 @@ cd "$(dirname "$0")/.."
 
 # Views.swift uses SwiftUI's @State macro, whose plugin ships inside Xcode and
 # not the Command Line Tools, so this needs a real Xcode exactly as the tests do.
-. "$(dirname "$0")/select-xcode.sh"
+# Relative to the repo root, not to $0 -- see the note in scripts/test.sh.
+. ./scripts/select-xcode.sh
 
 CONFIG="${CONFIG:-release}"
 APP="dist/Clipvelope.app"
