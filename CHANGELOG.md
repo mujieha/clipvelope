@@ -3,6 +3,45 @@
 Release notes for Clipvelope. Sparkle shows the section for a version in its
 update prompt; `make appcast` takes it from here.
 
+## 0.2.0
+
+### New
+
+- Paste directly: choosing an entry can put it straight into the app you were
+  typing in, instead of copying it for you to paste. It is off by default, and
+  because it presses Command + V for you it needs macOS Accessibility access,
+  which you grant yourself in System Settings; Preferences → Privacy says what
+  that permission covers. Option + Return pastes with formatting dropped.
+- The daily update check is now a setting. Turn "Check for updates
+  automatically" off in Preferences → General and Clipvelope makes no network
+  call at all until you press Check for Updates.
+- The panel stops at fifty rows, and now says how many more entries there are
+  beyond them — while you are searching, how many more matches — instead of
+  ending with no explanation.
+- VoiceOver reads the panel and Preferences: history rows say what they hold,
+  and the icon-only buttons say what they do rather than announcing as
+  "button".
+
+### Better
+
+- Search and autocomplete no longer slow down as the history fills up.
+- Search ignores accents, so "resume" finds "résumé" and "résumé" finds
+  "resume".
+- Less battery: the clipboard is checked less often while nothing is being
+  copied.
+
+### Fixed
+
+- Two different images that happened to share the same dimensions, size and
+  type were treated as the same entry: the second one was dropped and the
+  older picture shown under a new timestamp. They are now told apart by their
+  contents. Formatted text had the same flaw.
+- Only one copy of Clipvelope can run at a time. Two of them fought over the
+  global shortcuts, and Preferences then blamed another app for taking them.
+- Control + Option + V no longer depends on an internal name inside macOS that
+  a system update could change, which would have left the app looking broken
+  with no way in.
+
 ## 0.1.0
 
 First release.
