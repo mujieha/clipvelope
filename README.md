@@ -14,7 +14,9 @@ Local‑only macOS clipboard manager with encrypted storage.
   writes to `~/Documents`, which iCloud copies to your account if you use Desktop & Documents sync.
   That file is encrypted and its key stays in the local Keychain, so what would sync is ciphertext.
   A release build contacts exactly one URL — the update feed, once a day, to ask whether a newer
-  version exists — and sends nothing about you or what you copied. A build without the updater
+  version exists — and sends nothing about you or what you copied. That daily check is a setting:
+  turn **Check for updates automatically** off in **Preferences → General** and the app makes no
+  network call at all until you press **Check for Updates**. A build without the updater
   (`make app`, and what CI produces) makes no network calls at all, not even from `--status`.
   `Clipvelope --status` says which build you are running and, in a release build, whether
   that feed is actually reachable.

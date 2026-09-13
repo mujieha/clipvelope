@@ -892,6 +892,10 @@ private struct GeneralPane: View {
             Section {
                 LabeledContent("Version", value: Self.versionSummary)
                 if updater.isAvailable {
+                    Toggle("Check for updates automatically", isOn: Binding(
+                        get: { updater.automaticallyChecksForUpdates },
+                        set: { updater.setAutomaticallyChecksForUpdates($0) }
+                    ))
                     Button("Check for Updates…") { updater.checkForUpdates() }
                         .disabled(!updater.canCheckForUpdates)
                     if let notices = Bundle.main.url(forResource: "THIRD-PARTY-LICENSES",
@@ -903,10 +907,20 @@ private struct GeneralPane: View {
                 Text("About")
             } footer: {
                 if updater.isAvailable {
-                    Text("Clipvelope checks once a day and tells you when there is a new "
-                         + "version. Updates are signed; one that is not signed by this "
-                         + "developer is refused. Updates are delivered by Sparkle, which is "
-                         + "MIT licensed.")
+                    // The first sentence has to follow the toggle: with checking
+                    // off, saying it happens once a day would be a lie about the
+                    // one network call the app makes.
+                    if updater.automaticallyChecksForUpdates {
+                        Text("Clipvelope checks once a day and tells you when there is a new "
+                             + "version. Updates are signed; one that is not signed by this "
+                             + "developer is refused. Updates are delivered by Sparkle, which "
+                             + "is MIT licensed.")
+                    } else {
+                        Text("Clipvelope does not check on its own, and contacts nothing until "
+                             + "you press Check for Updates. Updates are signed; one that is "
+                             + "not signed by this developer is refused. Updates are delivered "
+                             + "by Sparkle, which is MIT licensed.")
+                    }
                 } else {
                     Text("This build does not check for updates.")
                 }
