@@ -342,6 +342,10 @@ struct HistoryRow: View {
             .foregroundColor(.secondary)
             .help("Delete")
         } else if isSelected {
+            // Stays "↩" while Option is held, even though Option + Return does
+            // something else. Swapping it would take an app-wide flagsChanged
+            // monitor running the whole time the panel is open, which is a lot
+            // of machinery for a badge; the General pane lists the key instead.
             KeyBadge(text: "↩")
         } else if index < 9 {
             KeyBadge(text: "⌘\(index + 1)")
@@ -480,10 +484,21 @@ struct ClipboardMenuView: View {
         panel.move(delta, rowCount: visibleItems.count)
     }
 
+    /// Return, and the row button: copy the entry and -- if the user has turned
+    /// Paste Directly on -- put it back where they were typing.
+    ///
+    /// `copyAndMaybePaste` closes the panel itself, and has to, because the
+    /// paste may only be posted once the panel has given the keyboard back.
+    /// Closing it here as well would close it twice.
     private func copySelected() {
         guard let item = panel.selectedItem(in: store.items) else { return }
-        store.copyToPasteboard(item)
-        closeMenuBarWindow()
+        store.copyAndMaybePaste(item)
+    }
+
+    /// Option + Return: the same, with any formatting dropped.
+    private func copySelectedAsPlainText() {
+        guard let item = panel.selectedItem(in: store.items) else { return }
+        store.copyPlainTextAndMaybePaste(item)
     }
 
     private func escape() {
@@ -572,10 +587,11 @@ struct ClipboardMenuView: View {
                 SectionLabel(title: group.section.title)
                 ForEach(group.items) { item in
                     let index = position[item.id] ?? 0
+                    // Both the click and the ⌘-number come through here, and
+                    // `copyAndMaybePaste` closes the panel itself.
                     HistoryRow(item: item, index: index, isSelected: index == panel.selection,
                                store: store) {
-                        store.copyToPasteboard(item)
-                        closeMenuBarWindow()
+                        store.copyAndMaybePaste(item)
                     }
                     .id(item.id)
                 }
@@ -680,7 +696,9 @@ struct ClipboardMenuView: View {
         }
         .background(MenuKeyHandler(query: queryBinding, suggestion: autocompleteSuggestion,
                                    preferencesCombo: store.preferencesHotkey,
-                                   onMove: move, onSubmit: copySelected, onEscape: escape,
+                                   onMove: move, onSubmit: copySelected,
+                                   onSubmitPlainText: copySelectedAsPlainText,
+                                   onEscape: escape,
                                    onPreferences: showPreferences))
     }
 }
@@ -784,6 +802,7 @@ private struct GeneralPane: View {
                 }
                 LabeledContent("Quick Slots", value: "Option + 1 to 9")
                 LabeledContent("Copy an item", value: "Up and Down, then Return")
+                LabeledContent("Copy it without formatting", value: "Option + Return")
                 LabeledContent("Copy one of the first nine", value: "Command + 1 to 9")
             } header: {
                 Text("Keyboard")
@@ -822,6 +841,31 @@ private struct GeneralPane: View {
 private struct PrivacyPane: View {
     @ObservedObject var store: ClipboardStore
     @State private var confirmSensitiveCapture = false
+    @State private var confirmDirectPaste = false
+    /// Whether macOS will let the app post a keystroke, as of a moment ago.
+    @State private var pasteIsTrusted = PasteService.isTrusted
+    @State private var trustTimer: Timer?
+
+    /// How often the permission is re-read while this pane is on screen.
+    ///
+    /// `AXIsProcessTrusted()` answers from a cache the system updates for us,
+    /// and nothing tells an app when the switch is thrown, so polling is the
+    /// only way to notice. It has to be noticed: the user grants this in System
+    /// Settings with Preferences still open, and a pane still saying "not
+    /// allowed" afterwards reads as the feature being broken. A second and a
+    /// half is below what anyone reads as a delay and far above what costs
+    /// anything.
+    private static let trustPollInterval: TimeInterval = 1.5
+
+    /// System Settings → Privacy & Security → Accessibility.
+    ///
+    /// Offered as well as the prompt because macOS shows its own prompt only
+    /// once per app: after the first time, the button that "asks" does nothing
+    /// visible, and this is the only way back. Verified on macOS 26 -- it opens
+    /// the list headed "Allow the applications below to control your computer",
+    /// not the unrelated Accessibility pane of the same name.
+    private static let accessibilitySettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
 
     private func chooseAppToIgnore() {
         let panel = NSOpenPanel()
@@ -879,6 +923,50 @@ private struct PrivacyPane: View {
             }
 
             Section {
+                Toggle("Paste directly into the app you were using", isOn: Binding(
+                    get: { store.pasteDirectly },
+                    set: { wantsPaste in
+                        if wantsPaste {
+                            confirmDirectPaste = true
+                        } else {
+                            store.setPasteDirectly(false)
+                        }
+                    }
+                ))
+                // Three states, not two. A toggle sitting on while the app
+                // cannot actually paste would look exactly like one that works,
+                // and the user would blame the paste rather than the permission.
+                if store.pasteDirectly {
+                    if pasteIsTrusted {
+                        Label("Clipvelope is allowed to paste for you. Choosing an entry puts "
+                              + "it back where you were typing.",
+                              systemImage: "checkmark.shield.fill")
+                    } else {
+                        Label("Clipvelope has not been allowed to paste for you, so choosing "
+                              + "an entry only copies it. Allow it under Accessibility and it "
+                              + "starts working — no restart needed.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        HStack {
+                            Button("Ask for Accessibility Access…") { PasteService.requestTrust() }
+                            Button("Open System Settings…") {
+                                NSWorkspace.shared.open(Self.accessibilitySettingsURL)
+                            }
+                        }
+                    }
+                }
+            } header: {
+                Text("Direct paste")
+            } footer: {
+                Text("Clipvelope needs Accessibility access to press Command + V for you. That "
+                     + "permission lets any app holding it observe and control other "
+                     + "applications; Clipvelope uses it for nothing else, and for nothing at "
+                     + "all while this is off. Turning this off does not take the permission "
+                     + "away — you revoke it yourself in System Settings → Privacy & Security "
+                     + "→ Accessibility.")
+            }
+
+            Section {
                 if store.isKeyIsolated {
                     Label("The encryption key is private to Clipvelope.",
                           systemImage: "checkmark.shield.fill")
@@ -929,6 +1017,30 @@ private struct PrivacyPane: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            pasteIsTrusted = PasteService.isTrusted
+            trustTimer?.invalidate()
+            trustTimer = Timer.scheduledTimer(withTimeInterval: Self.trustPollInterval,
+                                              repeats: true) { _ in
+                // Assigning the same value is free: SwiftUI only redraws when
+                // the state actually changes.
+                pasteIsTrusted = PasteService.isTrusted
+            }
+        }
+        .onDisappear {
+            trustTimer?.invalidate()
+            trustTimer = nil
+        }
+        .alert("Let Clipvelope paste for you?", isPresented: $confirmDirectPaste) {
+            Button("Cancel", role: .cancel) { }
+            Button("Turn It On") { store.setPasteDirectly(true) }
+        } message: {
+            Text("To press Command + V for you, Clipvelope needs Accessibility access. "
+                 + "That permission lets any app holding it observe and control other "
+                 + "applications — Clipvelope uses it only to post that one keystroke, "
+                 + "and it is yours to revoke in System Settings at any time.\n\nUntil "
+                 + "you grant it, choosing an entry copies it as it always has.")
+        }
         .alert("Record passwords in your clipboard history?",
                isPresented: $confirmSensitiveCapture) {
             Button("Cancel", role: .cancel) { }

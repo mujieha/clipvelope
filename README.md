@@ -25,6 +25,12 @@ Local‑only macOS clipboard manager with encrypted storage.
   says which is in use; [docs/SIGNING.md](docs/SIGNING.md) explains why and how to fix it.
 - **Fail‑safe**: if the vault cannot be decrypted (locked Keychain, denied access, corruption), Clipvelope **stops writing** and tells you, rather than silently starting from empty and overwriting your history.
 - **Skips passwords by default**: content marked concealed by password managers (the `org.nspasteboard.*` convention) is not recorded. You can also ignore specific apps, or pause capture entirely.
+- **No permission until you ask for one**: out of the box Clipvelope needs nothing from macOS — the
+  global shortcuts and the Quick Slots work without Accessibility, Screen Recording or Full Disk Access.
+  One optional feature does need a permission: **Paste directly** (off by default) presses **Command + V**
+  for you, and posting a keystroke requires **Accessibility** access. That permission is broad — it lets any
+  app holding it observe and control other applications — so it is yours to grant, and yours to revoke in
+  System Settings. See [SECURITY.md](SECURITY.md).
 
 ## Install
 1. Download `Clipvelope-<version>.dmg` from the [latest release](https://github.com/mujieha/clipvelope/releases/latest).
@@ -56,7 +62,9 @@ The app appears in the menu bar as **Clipvelope**.
 - **Control + Option + V** opens the history from any app. Clicking the menu bar icon does the same.
   Change the shortcut in Preferences → General.
 - Start typing to filter. **Tab** accepts the inline autocomplete suggestion.
-- **↑ ↓** move the selection, **↩** copies it to the clipboard and closes the panel.
+- **↑ ↓** move the selection, **↩** copies it to the clipboard and closes the panel — or pastes it
+  straight into what you were doing, if you turned **Paste directly** on in Preferences → Privacy.
+  **⌥↩** does the same with any formatting dropped.
   **⌘1..9** copies the first nine directly; clicking an item does the same.
 - **Esc** clears the search, or closes the panel if the search is already empty.
 - **Option+1..9** triggers Quick Slots **system-wide** — from any app, no Accessibility permission needed.
@@ -80,7 +88,7 @@ Opened from the **Preferences** button in the menu.
   change it), and the version.
 - **Quick Slots** — the ⌥1–9 entries; each is a text snippet or a shell command whose output is copied.
 - **Folders** — groups of snippets/commands with a Run button.
-- **Privacy** — pause capture, skip concealed content, and the ignored-apps list.
+- **Privacy** — pause capture, skip concealed content, paste directly, and the ignored-apps list.
 - **Backup** — export/import, and auto-backup.
 
 ## Privacy controls
@@ -97,6 +105,20 @@ Opened from the **Preferences** button in the menu.
   What you are agreeing to: passwords you copy get written to your clipboard history. The history is
   encrypted on disk, but anything in it can be copied back out, and it is included in any backup you
   export.
+- **Paste directly** (**off** by default) — with it on, choosing an entry does not just copy it: Clipvelope
+  presses **Command + V** so the entry lands where you were typing. **⌥↩** does the same with the
+  formatting dropped.
+
+  Posting a keystroke needs **Accessibility** access, and that is the honest cost: macOS grants that
+  permission whole, so an app holding it can observe and control other applications. Clipvelope posts
+  that one keystroke and nothing else, but nothing in the permission enforces that — what protects you
+  is that the setting is off until you turn it on, importing a portable backup can never turn it on, and
+  you grant and revoke the access yourself in **System Settings → Privacy & Security → Accessibility**.
+  Turning the setting back off does **not** revoke it; do that in System Settings.
+
+  The Privacy tab says which of the three situations you are in — off, on and allowed, or on but not
+  allowed yet — and offers the prompt and a link to System Settings for the last one. With the setting
+  on but the permission missing, choosing an entry still copies it and says so.
 - **Ignored apps** — anything copied while one of these apps is frontmost is not recorded.
 
 ## Backup & Restore

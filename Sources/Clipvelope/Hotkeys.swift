@@ -314,17 +314,23 @@ enum PanelOpener {
 
 /// The keys the history panel answers to while the search field has focus:
 /// Tab accepts the autocomplete suggestion, ↑↓ move the selection, Return copies
-/// it, Escape clears the search or closes the panel, and the user's Preferences
-/// shortcut opens Preferences.
+/// it, Option + Return copies it with its formatting dropped, Escape clears the
+/// search or closes the panel, and the user's Preferences shortcut opens
+/// Preferences.
 ///
 /// An NSEvent monitor rather than SwiftUI's onKeyPress because the text field
 /// would otherwise consume the arrows and Return first.
+///
+/// Deliberately knows nothing about the store: every key it answers to is
+/// reported as a closure, so what "copy" means stays a decision of the view.
 struct MenuKeyHandler: NSViewRepresentable {
     @Binding var query: String
     let suggestion: String?
     let preferencesCombo: KeyCombo
     let onMove: (Int) -> Void
     let onSubmit: () -> Void
+    /// Option + Return: the same entry, without its formatting.
+    let onSubmitPlainText: () -> Void
     let onEscape: () -> Void
     let onPreferences: () -> Void
 
@@ -345,6 +351,7 @@ struct MenuKeyHandler: NSViewRepresentable {
         coordinator.preferencesCombo = preferencesCombo
         coordinator.onMove = onMove
         coordinator.onSubmit = onSubmit
+        coordinator.onSubmitPlainText = onSubmitPlainText
         coordinator.onEscape = onEscape
         coordinator.onPreferences = onPreferences
     }
@@ -359,6 +366,7 @@ struct MenuKeyHandler: NSViewRepresentable {
         var preferencesCombo: KeyCombo = .defaultPreferences
         var onMove: (Int) -> Void = { _ in }
         var onSubmit: () -> Void = {}
+        var onSubmitPlainText: () -> Void = {}
         var onEscape: () -> Void = {}
         var onPreferences: () -> Void = {}
 
@@ -381,7 +389,16 @@ struct MenuKeyHandler: NSViewRepresentable {
                     return nil
                 case 126: onMove(-1); return nil
                 case 125: onMove(1); return nil
-                case 36, 76: onSubmit(); return nil
+                case 36, 76:
+                    // Only Option distinguishes the two. Every other modifier
+                    // still means plain Return, because a user holding Shift or
+                    // Control while choosing an entry meant to choose it, and
+                    // silently doing nothing would be the worse answer.
+                    let option = event.modifierFlags
+                        .intersection(.deviceIndependentFlagsMask)
+                        .contains(.option)
+                    if option { onSubmitPlainText() } else { onSubmit() }
+                    return nil
                 case 53: onEscape(); return nil
                 default: return event
                 }

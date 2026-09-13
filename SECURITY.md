@@ -72,3 +72,13 @@ suggestion, but it is not a vulnerability report.
   so contents cannot be forged or swapped between roles, but anyone who can
   write the vault directory can restore an older copy of files they took from it
   earlier and return your history to that earlier state.
+- **Direct paste means holding Accessibility access, which is broad.** Posting
+  Command + V for you requires it, and macOS grants it whole: an app holding it
+  can observe and control other applications, and nothing in the grant narrows
+  it to one keystroke. Clipvelope posts that one keystroke and nothing else, but
+  that is a property of this build's code, not something the permission
+  enforces. What protects you is that the permission is yours: the setting is
+  off until you turn it on in Preferences → Privacy, the app asks for nothing
+  until then, importing a portable backup cannot turn it on, and you grant and
+  revoke the access in System Settings → Privacy & Security → Accessibility,
+  where turning the setting back off does not revoke it for you.
