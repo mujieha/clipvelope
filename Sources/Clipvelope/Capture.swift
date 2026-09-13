@@ -130,13 +130,31 @@ final class ClipboardMonitor {
         // Always advance the change count, even when skipping, so a skipped item
         // is not re-examined on the next tick.
         if pb.changeCount == lastChangeCount { return }
+        // Counted before lastChangeCount moves. The counter advances once per
+        // write, so a jump of more than one says the pasteboard was overwritten
+        // between polls and those items are unrecoverable -- they are not on the
+        // pasteboard any more. Logged rather than shown: telling someone they
+        // lost a copy they cannot get back is noise, not truth-telling, but
+        // leaving the condition entirely invisible is how a 2.5 s idle rate
+        // survived a release.
+        let missed = CapturePolicy.missedChanges(previousCount: lastChangeCount,
+                                                 currentCount: pb.changeCount)
         lastChangeCount = pb.changeCount
         // Stamped before the pause check, and before any policy or size rule can
         // refuse the item: the schedule is a function of pasteboard activity,
         // not of what was kept. Somebody copying passwords is at the keyboard.
+        //
+        // This is also the whole of the monitor's response to `missed`, and it
+        // is why no extra one is needed: any observed change already drops the
+        // rate back to `active`, so a burst is polled quickly from its second
+        // item on whether or not the first was missed.
         lastChangeAt = Date()
 
         if isPaused { return }
+
+        if missed > 0 {
+            NSLog("%@", "Clipvelope: the pasteboard changed \(missed + 1) times between two polls; \(missed) item(s) were overwritten before they could be read. Idle poll is \(PollingPolicy.idle)s.")
+        }
 
         let types = (pb.types ?? []).map(\.rawValue)
         // The pasteboard does not record who wrote to it; the frontmost app at

@@ -58,6 +58,57 @@ final class CapturePolicyTests: XCTestCase {
     func testUnknownSourceIsStillCaptured() {
         XCTAssertTrue(shouldCapture(source: nil, ignored: ["com.1password.1password"]))
     }
+
+    // MARK: - Missed changes
+
+    // One write, one increment, nothing missed. This is every ordinary copy, and
+    // getting it wrong by one would log a miss on every single capture.
+    func testAnOrdinarySingleChangeMissedNothing() {
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: 41, currentCount: 42), 0)
+    }
+
+    // The regression this arithmetic exists to make visible: two copies inside
+    // one polling interval, the poll reading only the second.
+    func testTwoWritesInOneIntervalMissedOne() {
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: 41, currentCount: 43), 1)
+    }
+
+    func testALongerBurstMissesAllButTheLast() {
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: 0, currentCount: 5), 4)
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: 100, currentCount: 1000), 899)
+    }
+
+    // The monitor returns before asking, but the function must not answer -1.
+    func testAnUnchangedCounterMissedNothing() {
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: 42, currentCount: 42), 0)
+    }
+
+    // changeCount is per boot and restarts at zero when the pasteboard server
+    // does. A reset says nothing about how many writes preceded it, so the
+    // honest answer is none rather than a negative count.
+    func testACounterThatWentBackwardsReportsNoMiss() {
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: 900, currentCount: 3), 0)
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: 900, currentCount: 0), 0)
+    }
+
+    func testTheExtremesDoNotOverflow() {
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: .min, currentCount: .max),
+                       0, "an impossible span must not trap or wrap")
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: .max, currentCount: .min), 0)
+        XCTAssertEqual(CapturePolicy.missedChanges(previousCount: .max - 1, currentCount: .max), 0)
+    }
+
+    // The count is never negative, whatever pair it is handed.
+    func testTheCountIsNeverNegative() {
+        let counts: [Int] = [.min, -1000, -1, 0, 1, 42, 1_000_000, .max]
+        for previous in counts {
+            for current in counts {
+                XCTAssertGreaterThanOrEqual(
+                    CapturePolicy.missedChanges(previousCount: previous, currentCount: current),
+                    0, "previous \(previous), current \(current)")
+            }
+        }
+    }
 }
 
 // The back-off schedule is a pure function precisely so it can be pinned here:
@@ -121,5 +172,57 @@ final class PollingPolicyTests: XCTestCase {
         XCTAssertGreaterThan(active, 0)
         XCTAssertGreaterThan(idle, active)
         XCTAssertGreaterThan(window, 0)
+    }
+
+    // MARK: - The ceiling on the idle rate
+
+    // If you are reading this because the assertion below failed, the change
+    // that raised PollingPolicy.idle is not a tuning change and the number is
+    // not free.
+    //
+    // The poll is the only thing that reads NSPasteboard.changeCount, and the
+    // counter says only *that* the pasteboard changed, never what it held in
+    // between. So the idle interval is the exact width of a window in which a
+    // user who copies A and then copies B before the next poll loses A
+    // outright: the poll finds the pasteboard holding B, and A is gone with no
+    // trace, no error and nothing in the history. It cannot be recovered
+    // afterwards by any means, because it is no longer anywhere.
+    //
+    // This is not hypothetical. The rate was 2.5 s for one release, and two
+    // copies 1.5 s apart from an idle Mac lost the first one in 3 of 11
+    // measured trials. Nobody noticed until it was found by accident.
+    //
+    // Raising this buys idle wakeups, which is a real thing to want and is why
+    // the pressure on the number only ever points one way. It is not worth it.
+    // An app whose entire promise is "you do not lose what you copied" does not
+    // trade that promise for a battery statistic. If a slower rate at rest is
+    // genuinely needed, it needs a way to notice a change that does not depend
+    // on the poll -- then the window closes and this ceiling can go with it.
+    func testTheIdleRateIsUnderTheCeiling() {
+        XCTAssertLessThanOrEqual(
+            PollingPolicy.idle, PollingPolicy.idleCeiling,
+            """
+            PollingPolicy.idle is \(PollingPolicy.idle)s, above the \
+            \(PollingPolicy.idleCeiling)s ceiling. The idle interval is the width of \
+            the window in which a copied item is lost with no trace: copy A, copy B \
+            before the next poll, and the poll sees only B. Read the comment above \
+            this test before changing either number.
+            """)
+    }
+
+    // The ceiling is the point of the test above, so it has to be pinned too --
+    // otherwise raising `idle` and raising `idleCeiling` to match would pass.
+    func testTheCeilingItselfIsWhereItWasAgreed() {
+        XCTAssertEqual(PollingPolicy.idleCeiling, 1.2,
+                       "the agreed ceiling is 1.2s; raising it is the same change as raising idle")
+    }
+
+    // The measured case: two copies about 1.5 s apart, which is a fast but
+    // ordinary human rhythm. At an idle rate of 1.5 s or more, a poll need not
+    // fall between them at all and the first one is lost.
+    func testTheIdleRateIsShorterThanAFastTwoCopyBurst() {
+        let burstGap: TimeInterval = 1.5
+        XCTAssertLessThan(idle, burstGap,
+                          "a poll must always fall between two copies \(burstGap)s apart")
     }
 }

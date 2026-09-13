@@ -100,12 +100,41 @@ enum CapturePolicy {
         }
         return true
     }
+
+    /// How many pasteboard writes happened between two observations of
+    /// `NSPasteboard.changeCount` that the poll never got to read.
+    ///
+    /// The counter advances once per write, so a poll that finds it three higher
+    /// than it left it knows two items came and went. Their content is gone --
+    /// the pasteboard holds only the last of them -- so this cannot recover
+    /// anything; it exists so the condition is countable rather than invisible.
+    ///
+    /// A delta of one is the ordinary case and means nothing was missed, which
+    /// is the off-by-one this function exists to hold still. A delta of zero or
+    /// less is not a miss either: the counter is per boot and resets when the
+    /// pasteboard server restarts, and a reset tells us nothing about how many
+    /// writes preceded it, so the honest answer is zero rather than a negative
+    /// number.
+    static func missedChanges(previousCount: Int, currentCount: Int) -> Int {
+        let (delta, overflow) = currentCount.subtractingReportingOverflow(previousCount)
+        guard !overflow, delta > 1 else { return 0 }
+        return delta - 1
+    }
 }
 
 // MARK: - Polling Policy
 
 /// How often the pasteboard is polled. macOS has no notification for pasteboard
 /// changes, so polling is the only mechanism; what this decides is the rate.
+///
+/// **Read this before widening an interval to save wakeups.** The interval
+/// is not only a latency; it is the width of a window in which a copied item is
+/// lost outright. `NSPasteboard.changeCount` says only *that* the pasteboard
+/// changed, never what it held in between, and the poll is the only thing that
+/// reads it. So if the user copies A and then copies B before the next poll
+/// fires, that poll finds the counter two higher and the pasteboard holding B.
+/// A is gone, permanently and with no trace. Whatever number stands in `idle`
+/// is exactly how long that window is.
 ///
 /// Two rates, not a ramp. A ramp would be more code and more test surface for
 /// nothing the user can perceive: the whole span it would interpolate across is
@@ -117,13 +146,39 @@ enum PollingPolicy {
     /// reported a missed or late capture at it, so it is left alone.
     static let active: TimeInterval = 0.6
 
-    /// The rate at rest. Chosen as the largest delay that is still invisible:
-    /// even by keyboard, copying something and then opening the panel takes
-    /// longer than this, and the first poll after a change snaps the rate back
-    /// to `active`, so a burst of copying is polled quickly from its second
-    /// item on. It cuts wakeups from 100 a minute to 24 -- a 76 per cent
-    /// reduction over an idle hour, which is the case this exists for.
-    static let idle: TimeInterval = 2.5
+    /// The rate at rest, and therefore the width of the loss window described
+    /// above. One second, and `idleCeiling` holds it there.
+    ///
+    /// This was 2.5 s, chosen as the largest delay that is still invisible --
+    /// which was the wrong question. A delay nobody can see is not the same as a
+    /// delay nobody is harmed by: at 2.5 s, two copies 1.5 s apart from an idle
+    /// Mac lost the first one outright for 40 per cent of the poll phases, and
+    /// measuring it that way found 3 losses in 11 trials. The first copy after
+    /// sitting down at the machine is exactly the one most at risk, because that
+    /// is when the poll is guaranteed to be at its slowest.
+    ///
+    /// One second is under the gap in a real two-copy burst -- select, copy,
+    /// move, select, copy is well over a second even by keyboard -- so the two
+    /// cannot collide. 1.2 s would also clear the 1.5 s burst measured here, but
+    /// only by 0.3 s, and the burst is a human rhythm rather than a constant.
+    /// The wakeup saving is what is traded away and it is still most of the
+    /// prize: 100 a minute at `active`, 60 at this rate, 24 at the old 2.5 s. A
+    /// 40 per cent cut in idle wakeups is worth having; it is not worth silently
+    /// dropping what somebody copied.
+    static let idle: TimeInterval = 1.0
+
+    /// The highest `idle` may ever be, pinned by a test.
+    ///
+    /// The ceiling is here because the pressure on this number only ever points
+    /// one way: every future look at the poll will be someone counting wakeups,
+    /// and raising `idle` is the cheapest way to reduce them. What that person
+    /// will not see in a wakeup graph is the item the app threw away. Raising
+    /// this constant widens the window in which a copied item is lost with no
+    /// trace, in an app whose entire promise is that it does not lose what you
+    /// copied. If a future change genuinely needs a slower rate at rest, it
+    /// needs a mechanism that closes the window -- reading the pasteboard on
+    /// some signal other than the poll -- not a larger number here.
+    static let idleCeiling: TimeInterval = 1.2
 
     /// How long after the last change the poll stays at its quickest. Fifteen
     /// seconds covers a normal copy-paste-copy rhythm without holding the fast
