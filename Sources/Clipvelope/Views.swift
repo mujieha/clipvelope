@@ -23,7 +23,10 @@ struct PreferencesButton: View {
     var body: some View {
         SettingsLink {
             HStack(spacing: 4) {
+                // The word beside it already says what this is; announcing the
+                // gear as well would read the control twice.
                 Image(systemName: "gearshape")
+                    .accessibilityHidden(true)
                 Text("Preferences")
             }
             .font(.system(size: 11))
@@ -100,13 +103,23 @@ struct HotkeyRecorder: View {
                 recording ? stop() : start()
             }
             .help(recording ? "Escape cancels." : "Click, then press the keys you want.")
+            // While recording, the only signal that the app is listening is the
+            // button's caption changing. Spoken, that has to say it outright:
+            // a user who cannot see the change would otherwise sit at a button
+            // that appears to have done nothing.
+            .accessibilityLabel(recording ? "Listening for the new shortcut"
+                                          : "Shortcut, \(combo.displayName)")
+            .accessibilityHint(recording ? "Press the keys you want, or Escape to cancel."
+                                         : "Activate, then press the keys you want.")
             if recording {
                 Button("Cancel") { stop() }
                     .buttonStyle(.borderless)
+                    .accessibilityHint("Stops listening and keeps \(combo.displayName).")
             } else if combo != defaultCombo {
                 Button("Reset") { onChange(defaultCombo) }
                     .buttonStyle(.borderless)
                     .help("Back to \(defaultCombo.displayName)")
+                    .accessibilityHint("Back to \(defaultCombo.displayName).")
             }
         }
         .onDisappear { if recording { stop() } }
@@ -163,6 +176,7 @@ struct StorageFailureBanner: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
+                    .accessibilityHidden(true)
                 Text(store.writesSuspended ? "Saving paused" : "Could not save").bold()
             }
             .font(.system(size: 12))
@@ -296,7 +310,11 @@ struct HistoryRow: View {
         }
     }
 
-    private var tooltip: String {
+    /// Everything about the entry that the preview itself does not show: which
+    /// flavour of text it is, where it came from, and when. The tooltip and the
+    /// spoken label are both built from this, so the mouse and VoiceOver can
+    /// never be told two different stories about the same row.
+    private var contextLines: [String] {
         var lines: [String] = []
         if case .richText(let info) = item.content {
             lines.append(info.typeIdentifier == "public.html" ? "Formatted text (HTML)"
@@ -306,7 +324,46 @@ struct HistoryRow: View {
             lines.append("Copied from \(AppNameResolver.displayName(forBundleID: source))")
         }
         lines.append(item.createdAt.formatted(date: .abbreviated, time: .shortened))
-        return lines.joined(separator: "\n")
+        return lines
+    }
+
+    private var tooltip: String {
+        contextLines.joined(separator: "\n")
+    }
+
+    /// What the row holds, said out loud. The visible row leans on a thumbnail,
+    /// a symbol and two type sizes to tell text from an image from a set of
+    /// files; none of that survives being spoken, so the words have to carry it.
+    private var contentDescription: String {
+        switch item.content {
+        case .text(let value):
+            return spokenText(PreviewText.summary(of: value))
+
+        case .richText(let info):
+            return spokenText(PreviewText.summary(of: info.plainText))
+
+        case .image(let info):
+            return "Image, \(info.pixelWidth) by \(info.pixelHeight)"
+
+        case .files(let refs):
+            let names = refs.map(\.name).joined(separator: ", ")
+            return refs.count == 1 ? "File, \(names)" : "\(refs.count) files, \(names)"
+        }
+    }
+
+    private func spokenText(_ summary: PreviewText.Summary) -> String {
+        let body = summary.text.isEmpty ? "Whitespace only" : summary.text
+        return summary.lineCount > 1 ? "\(body), \(summary.lineCount) lines" : body
+    }
+
+    private var accessibilityDescription: String {
+        ([contentDescription] + contextLines).joined(separator: ", ")
+    }
+
+    private var accessibilityHintText: String {
+        index < 9 ? "Return copies this entry. Command \(index + 1) copies it from anywhere "
+                    + "in the panel."
+                  : "Return copies this entry."
     }
 
     private var copyButton: some View {
@@ -318,6 +375,8 @@ struct HistoryRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityDescription)
+        .accessibilityHint(accessibilityHintText)
         .onAppear {
             // Thumbnails are read from the payload file on demand and cached by
             // the store, so the index stays small.
@@ -334,6 +393,7 @@ struct HistoryRow: View {
             .buttonStyle(.plain)
             .foregroundColor(.secondary)
             .help(item.isPinned ? "Unpin" : "Pin")
+            .accessibilityLabel(item.isPinned ? "Unpin this item" : "Pin this item")
 
             Button(action: { store.remove(item) }) {
                 Image(systemName: "trash")
@@ -341,14 +401,20 @@ struct HistoryRow: View {
             .buttonStyle(.plain)
             .foregroundColor(.secondary)
             .help("Delete")
+            .accessibilityLabel("Delete this item")
         } else if isSelected {
             // Stays "↩" while Option is held, even though Option + Return does
             // something else. Swapping it would take an app-wide flagsChanged
             // monitor running the whole time the panel is open, which is a lot
             // of machinery for a badge; the General pane lists the key instead.
+            // The badges are a hint drawn next to a row that already says what
+            // it is and which key copies it; announced on their own they are a
+            // stray "return" with nothing attached to it.
             KeyBadge(text: "↩")
+                .accessibilityHidden(true)
         } else if index < 9 {
             KeyBadge(text: "⌘\(index + 1)")
+                .accessibilityHidden(true)
         }
     }
 
@@ -436,8 +502,12 @@ struct StateStrip: View {
     var body: some View {
         let content = content
         HStack(spacing: 6) {
+            // The symbol and the orange tint restate what the sentence beside
+            // them already says. Hidden, the strip announces as that sentence
+            // and nothing else.
             Image(systemName: content.symbol)
                 .font(.system(size: 10))
+                .accessibilityHidden(true)
             Text(content.text)
                 .font(.system(size: 11))
                 .lineLimit(1)
@@ -540,12 +610,16 @@ struct ClipboardMenuView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(.secondary)
                 .font(.system(size: 14))
+                .accessibilityHidden(true)
             ZStack(alignment: .leading) {
                 if let suggestion = autocompleteSuggestion {
+                    // Drawn behind what is being typed, as a ghost. Read aloud
+                    // as its own line it would sound like a second search field.
                     Text(suggestion)
                         .foregroundColor(.secondary)
                         .opacity(0.4)
                         .lineLimit(1)
+                        .accessibilityHidden(true)
                 }
                 TextField("Search clipboard", text: queryBinding)
                     .textFieldStyle(.plain)
@@ -610,12 +684,16 @@ struct ClipboardMenuView: View {
             Button(action: { store.setCaptureSuspended(!store.captureSuspended) }) {
                 HStack(spacing: 4) {
                     Image(systemName: store.captureSuspended ? "play.circle" : "pause.circle")
+                        .accessibilityHidden(true)
                     Text(store.captureSuspended ? "Resume" : "Pause")
                 }
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityHint(store.captureSuspended
+                               ? "Starts recording what you copy again."
+                               : "Stops recording what you copy. The history is kept.")
 
             Spacer()
 
@@ -933,25 +1011,47 @@ private struct PrivacyPane: View {
                         }
                     }
                 ))
+                .accessibilityHint("Needs Accessibility permission to press Command V for "
+                                   + "you. Without it, choosing an entry only copies it.")
                 // Three states, not two. A toggle sitting on while the app
                 // cannot actually paste would look exactly like one that works,
                 // and the user would blame the paste rather than the permission.
                 if store.pasteDirectly {
                     if pasteIsTrusted {
+                        // Which of the three states this is, is carried visually
+                        // by a shield against a warning triangle and by plain
+                        // text against orange. Spoken, the icon is gone and the
+                        // colour with it, so the state is named in the first
+                        // words instead: "granted" here, "not granted" below,
+                        // and off, where neither line is drawn and the toggle
+                        // itself announces as off.
                         Label("Clipvelope is allowed to paste for you. Choosing an entry puts "
                               + "it back where you were typing.",
                               systemImage: "checkmark.shield.fill")
+                            .accessibilityLabel("Accessibility permission granted. Clipvelope "
+                                                + "is allowed to paste for you. Choosing an "
+                                                + "entry puts it back where you were typing.")
                     } else {
                         Label("Clipvelope has not been allowed to paste for you, so choosing "
                               + "an entry only copies it. Allow it under Accessibility and it "
                               + "starts working — no restart needed.",
                               systemImage: "exclamationmark.triangle.fill")
                             .foregroundColor(.orange)
+                            .accessibilityLabel("Accessibility permission not granted. "
+                                                + "Clipvelope has not been allowed to paste "
+                                                + "for you, so choosing an entry only copies "
+                                                + "it. Allow it under Accessibility and it "
+                                                + "starts working — no restart needed.")
                         HStack {
                             Button("Ask for Accessibility Access…") { PasteService.requestTrust() }
+                                .accessibilityHint("Shows the system's own prompt. macOS "
+                                                   + "shows it only once per app, so after "
+                                                   + "the first time nothing may appear.")
                             Button("Open System Settings…") {
                                 NSWorkspace.shared.open(Self.accessibilitySettingsURL)
                             }
+                            .accessibilityHint("Opens Privacy and Security, Accessibility, "
+                                               + "where you can allow Clipvelope yourself.")
                         }
                     }
                 }
@@ -1007,6 +1107,9 @@ private struct PrivacyPane: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Stop ignoring")
+                        // One trash icon per ignored app, all on one screen.
+                        .accessibilityLabel("Stop ignoring "
+                            + AppNameResolver.displayName(forBundleID: bundleID))
                     }
                 }
                 Button("Add App…", action: chooseAppToIgnore)
@@ -1119,6 +1222,9 @@ private struct QuickSlotsPane: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Remove slot")
+                        // Up to nine of these on one screen; the slot's key is
+                        // what tells them apart, on screen and out loud.
+                        .accessibilityLabel("Remove slot Option \(index + 1)")
                     }
                 }
             }
@@ -1155,6 +1261,15 @@ private struct FoldersPane: View {
         store.persistState()
     }
 
+    /// A command in a few words: its label if it has one, otherwise the start
+    /// of what it holds. Only ever spoken, so it may be shorter than the field.
+    private static func describe(_ item: CommandItem) -> String {
+        let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { return title }
+        let content = PreviewText.summary(of: item.content, maxCharacters: 40).text
+        return content.isEmpty ? "without a label" : content
+    }
+
     private func updateItem(_ folderID: UUID, _ itemID: UUID,
                             _ change: (inout CommandItem) -> Void) {
         update(folderID) { folder in
@@ -1180,6 +1295,7 @@ private struct FoldersPane: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Delete folder")
+                        .accessibilityLabel("Delete folder \(folder.name)")
                     }
                 } header: {
                     Button {
@@ -1217,6 +1333,10 @@ private struct FoldersPane: View {
                             }
                             .buttonStyle(.borderless)
                             .help("Remove")
+                            // A trash icon per command, stacked down the pane.
+                            // "Remove" on its own would be the same word five
+                            // times over.
+                            .accessibilityLabel("Remove command \(Self.describe(item))")
                         }
                     }
                 }
@@ -1241,6 +1361,7 @@ private struct FoldersPane: View {
                                     .foregroundColor(.secondary)
                                 Image(systemName: "chevron.right")
                                     .foregroundColor(.secondary)
+                                    .accessibilityHidden(true)
                             }
                             .contentShape(Rectangle())
                         }
