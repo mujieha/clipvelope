@@ -553,6 +553,54 @@ final class StoreIntegrationTests: XCTestCase {
                        .failed(.destinationNotConfirmed))
     }
 
+    /// `closePanelThenPaste` stamps the frontmost process on the reasoning that
+    /// an LSUIElement app never becomes frontmost. It does not become frontmost
+    /// by showing a window -- but `Views.swift` calls
+    /// `NSApp.activate(ignoringOtherApps: true)` in two places, for Preferences
+    /// and for the Delete Everything alert, and that is precisely how an
+    /// accessory app becomes frontmost. The plausible route is onboarding: open
+    /// Preferences, switch Paste Directly on, close it, open the panel, press
+    /// Return.
+    ///
+    /// Nothing was ever pasted into Clipvelope -- `stillHasFocus` refuses
+    /// independently -- so this is about what the user is *told*. "Could not
+    /// confirm you were still in the application you started in" is not merely
+    /// unhelpful here, it is false: the application they started in was
+    /// Clipvelope.
+    func testAPasteStartedInsideClipvelopeSaysSoRatherThanBlamingTheUser() {
+        let chosen = Date()
+        let postBy = chosen.addingTimeInterval(PasteService.postWindow)
+        let clipvelope: pid_t = 999
+
+        XCTAssertEqual(refusal(now: chosen, postBy: postBy,
+                               destination: clipvelope, frontmost: 501, own: clipvelope),
+                       .failed(.startedInClipvelope))
+
+        // Still its own answer when the destination happens to match, which is
+        // the case where `frontmost == destination` would otherwise have let the
+        // paste through and typed the entry into the panel's search field.
+        XCTAssertEqual(refusal(now: chosen, postBy: postBy,
+                               destination: clipvelope, frontmost: clipvelope, own: clipvelope),
+                       .failed(.startedInClipvelope))
+
+        XCTAssertNotEqual(PasteService.Outcome.failed(.startedInClipvelope),
+                          .failed(.destinationNotConfirmed),
+                          "an application the user never left and one they did are not "
+                          + "the same situation and must not read the same")
+
+        // Behind the clipboard check, like the other two, because its remedy is
+        // also "press Command + V" and that is only sound while the clipboard
+        // still holds the entry.
+        XCTAssertEqual(refusal(now: chosen, postBy: postBy,
+                               destination: clipvelope, frontmost: 501,
+                               clipboardWas: 12, clipboardIs: 13, own: clipvelope),
+                       .failed(.clipboardChanged))
+
+        // And an ordinary destination is untouched by any of it.
+        XCTAssertNil(refusal(now: chosen, postBy: postBy,
+                             destination: 501, frontmost: 501, own: clipvelope))
+    }
+
     /// Nothing checked that the pasteboard still held what was copied.
     /// `runShellAndCopy` finishes on the main queue at an arbitrary later
     /// moment, so a Quick Slot command completing inside the window replaced the
@@ -589,7 +637,8 @@ final class StoreIntegrationTests: XCTestCase {
 
         let spoken: [PasteService.Outcome] = [
             .notTrusted, .failed(.noEvent), .failed(.focusDidNotReturn), .failed(.tookTooLong),
-            .failed(.destinationNotConfirmed), .failed(.clipboardChanged)
+            .failed(.destinationNotConfirmed), .failed(.startedInClipvelope),
+            .failed(.clipboardChanged)
         ]
         let messages = spoken.compactMap(\.message)
         XCTAssertEqual(messages.count, spoken.count, "every failure has to say something")
@@ -623,6 +672,31 @@ final class StoreIntegrationTests: XCTestCase {
         XCTAssertEqual(shown.count, 2)
     }
 
+    /// The HUD's fade must not carry away the message that replaced it.
+    ///
+    /// `dismiss` runs a 250ms `NSAnimationContext` group whose completion
+    /// handler orders the panel out. `show` sets the panel opaque again, but
+    /// writing the property does not cancel an animation already in flight and
+    /// the handler runs at the end of the group regardless. So a second notice
+    /// arriving inside that quarter second -- within 250ms of the eight-second
+    /// auto-dismiss, or of the user clicking the previous one away -- was
+    /// ordered front, faded to nothing and ordered out; the new dismissal timer
+    /// then found an invisible panel and did nothing, and the user never read
+    /// it. That is the exact silent failure the HUD exists to remove.
+    ///
+    /// Only the decision is tested. The fade itself is a window-server
+    /// animation on a real `NSPanel` and there is nothing here to run one
+    /// against, so the rule was made a pure function -- the same shape as
+    /// `PasteService.refusal` and for the same reason.
+    func testTheNoticeHUDDoesNotOrderOutAMessageThatArrivedDuringTheFade() {
+        XCTAssertTrue(NoticeHUD.mayOrderOut(started: 3, current: 3),
+                      "nothing happened during the fade, so it finishes as asked")
+        XCTAssertFalse(NoticeHUD.mayOrderOut(started: 3, current: 4),
+                       "a message arrived during the fade and is on screen now")
+        XCTAssertFalse(NoticeHUD.mayOrderOut(started: 3, current: 5),
+                       "two did; the panel still belongs to the newest of them")
+    }
+
     /// Which surface a notice goes to. Getting this wrong in one direction is a
     /// redundant message; in the other it is the silent failure back again, so
     /// the rule stays quiet only when both signals agree the strip is there.
@@ -644,10 +718,12 @@ final class StoreIntegrationTests: XCTestCase {
                          destination: pid_t? = 501,
                          frontmost: pid_t? = 501,
                          clipboardWas: Int = 7,
-                         clipboardIs: Int = 7) -> PasteService.Outcome? {
+                         clipboardIs: Int = 7,
+                         own: pid_t = 999) -> PasteService.Outcome? {
         PasteService.refusal(trusted: trusted, now: now, postBy: postBy,
                              destination: destination, frontmost: frontmost,
-                             clipboardWas: clipboardWas, clipboardIs: clipboardIs)
+                             clipboardWas: clipboardWas, clipboardIs: clipboardIs,
+                             own: own)
     }
 
     func testIgnoredAppsPersistAndDeduplicate() {

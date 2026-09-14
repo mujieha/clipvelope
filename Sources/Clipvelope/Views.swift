@@ -508,10 +508,27 @@ struct StateStrip: View {
             Image(systemName: content.symbol)
                 .font(.system(size: 10))
                 .accessibilityHidden(true)
+            // Two lines and a tooltip, rather than one or the other.
+            //
+            // The notice duration was raised from six seconds to eight with the
+            // stated reason that every one of these messages is two sentences
+            // and ends in an instruction -- and on one line at 11pt in a 380pt
+            // panel the second sentence, which is the instruction, could not be
+            // read at all. Two lines carry all of the shorter messages and most
+            // of the longest; `.help` carries the rest, and is the only part
+            // that cannot truncate no matter how long a future message runs.
+            // `fixedSize` vertically so the second line is given room instead of
+            // being compressed back out of existence, and the width comes from a
+            // `frame` rather than from a trailing `Spacer`: a spacer and a
+            // wrapping text both want the slack, and splitting it between them
+            // is how a two-line label ends up truncated on one line anyway. The
+            // leading alignment is what the spacer was there for.
             Text(content.text)
                 .font(.system(size: 11))
-                .lineLimit(1)
-            Spacer(minLength: 0)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(content.text)
         }
         .foregroundColor(content.degraded ? .orange : .secondary)
         .padding(.horizontal, 12)

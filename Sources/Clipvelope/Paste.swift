@@ -16,8 +16,21 @@ import ApplicationServices
 /// `RegisterEventHotKey` rather than an `NSEvent` global monitor: precisely so
 /// that the app needs no permission at all. That property is deliberately kept.
 /// Everything here is inert until the user turns `pasteDirectly` on *and*
-/// grants Accessibility, nothing in this file runs on any other path, and the
-/// setting cannot be switched on by a file -- see `ClipboardStore.disarming`.
+/// grants Accessibility, and nothing in this file runs on any other path.
+///
+/// What an imported file can do to that setting, stated exactly, because an
+/// earlier version of this comment claimed more than the code keeps. A
+/// *portable* backup -- one sealed with a password, which can come from anyone
+/// -- cannot switch it on: `ClipboardStore.disarming` discards the imported
+/// value and pins this Mac's own, in both directions. A *device-bound* backup
+/// -- sealed with this Mac's Keychain key, which is the auto-backup file in
+/// `~/Documents` as well as a keychain export -- skips `disarming` entirely and
+/// reaches `apply`, which assigns `pasteDirectly` with no trust gate. That is
+/// deliberate: such a file can only have been written by this app on this Mac,
+/// so restoring it returns the user's own settings, and it can only put back a
+/// state this Mac was once in -- it cannot invent an answer the user never
+/// gave. `SECURITY.md` documents the same thing as a bounded rollback limit,
+/// and the two must not drift apart again.
 ///
 /// Free of SwiftUI on purpose: this is system plumbing, and the view layer only
 /// ever sees the outcome.
@@ -36,7 +49,7 @@ enum PasteService {
         case notTrusted
         case failed(Reason)
 
-        /// Why a trusted paste still did not happen. Five genuinely different
+        /// Why a trusted paste still did not happen. Six genuinely different
         /// faults that must not be reported with one message.
         enum Reason: Equatable {
             /// CoreGraphics would not hand over an event to post.
@@ -59,6 +72,16 @@ enum PasteService {
             /// application if the user switched during it, and a switch takes
             /// about 300ms against a two-second window.
             case destinationNotConfirmed
+            /// Clipvelope itself was the frontmost application when the user
+            /// chose the entry, so there was never anywhere else for it to go.
+            ///
+            /// Its own case, and not `destinationNotConfirmed`, because that
+            /// message says "you were not still in the application you started
+            /// in" -- a sentence that is simply untrue here, since the
+            /// application they started in *was* Clipvelope. Posting is refused
+            /// either way; the point of the distinction is that the user is told
+            /// something that matches what they did.
+            case startedInClipvelope
             /// Something replaced the entry on the clipboard between the copy
             /// and the keystroke -- a Quick Slot command finishing, or any
             /// other application writing to the pasteboard. Posting now would
@@ -102,6 +125,10 @@ enum PasteService {
                 return "The entry was copied, but Clipvelope could not confirm you were still "
                     + "in the application you started in, so nothing was pasted. Press "
                     + "Command + V to paste it where you want it."
+            case .failed(.startedInClipvelope):
+                return "The entry was copied, but Clipvelope itself was in front when you chose "
+                    + "it, so there was nowhere to paste it. Click where you want it and press "
+                    + "Command + V."
             case .failed(.clipboardChanged):
                 return "The entry was copied, but something else replaced it on the clipboard "
                     + "before it could be pasted, so nothing was pasted and the clipboard now "
@@ -221,6 +248,31 @@ enum PasteService {
         // changed only by events this source posts, so nothing the user's own
         // hands are doing can be folded in. The explicit `flags` assignments
         // below then say exactly which modifiers this keystroke carries.
+        //
+        // **Measured**, which the change to this value originally was not, and
+        // it is the half that could have broken direct paste for everyone: if a
+        // private-state source did not work with `.cghidEventTap`, the only
+        // symptom would have been the absence of text. Six posts into a scratch
+        // TextEdit document -- this exact sequence, same tap, same suppression
+        // filter, same explicit flags -- three from each source, alternating:
+        //
+        //     .privateState          arrived, three times out of three
+        //     .combinedSessionState  arrived, three times out of three
+        //
+        // and the events went out carrying `maskCommand` and nothing else from
+        // either source. So the known-working value was not traded for a guess;
+        // both work, and this one additionally cannot fold in a held modifier
+        // at creation time.
+        //
+        // **Open question, deliberately left open.** Whether a *physically*
+        // held Option bleeds into a posted event at the window server, past the
+        // explicit `flags` assignment, is not settled here. It cannot be: an
+        // automated check cannot hold a key down, and the only API that reports
+        // the session's live modifier state, `CGEventSourceFlagsState`,
+        // deadlocked inside SkyLight when it was tried with a synthetic Option
+        // outstanding -- which is a worse failure than the one being guarded
+        // against. The defence costs nothing measurable and is kept on that
+        // basis, not on a measurement it does not have.
         guard let source = CGEventSource(stateID: .privateState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKeyV, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKeyV, keyDown: false)
@@ -318,15 +370,35 @@ enum PasteService {
     ///   - frontmost: the frontmost process now, `nil` if there is none.
     ///   - clipboardWas: `NSPasteboard.changeCount` just after the copy landed.
     ///   - clipboardIs: `NSPasteboard.changeCount` now.
+    ///   - own: this process's identifier, so a destination that is Clipvelope
+    ///     itself can be named rather than reported as a failure to confirm.
     static func refusal(trusted: Bool,
                         now: Date,
                         postBy postDeadline: Date,
                         destination: pid_t?,
                         frontmost: pid_t?,
                         clipboardWas: Int,
-                        clipboardIs: Int) -> Outcome? {
+                        clipboardIs: Int,
+                        own: pid_t) -> Outcome? {
         guard trusted else { return .notTrusted }
         guard clipboardWas == clipboardIs else { return .failed(.clipboardChanged) }
+        // Before the guard below, because it is the one case in which that
+        // guard's sentence would be false rather than merely unhelpful.
+        //
+        // `closePanelThenPaste` stamps the frontmost process on the reasoning
+        // that an LSUIElement app never becomes frontmost -- which is true of
+        // the history panel and of Preferences merely being open, and not true
+        // at all once something calls `NSApp.activate(ignoringOtherApps: true)`.
+        // `Views.swift` does exactly that in two places, and the plausible route
+        // through them is onboarding: open Preferences, switch Paste Directly
+        // on, close it, open the panel, press Return. The stamp is then
+        // Clipvelope's own process.
+        //
+        // Refusing is right -- there is no document behind the panel to paste
+        // into, and `stillHasFocus` would refuse independently -- but the right
+        // thing to *say* is that the user was in Clipvelope, not that they left
+        // the application they started in.
+        if let destination, destination == own { return .failed(.startedInClipvelope) }
         // Three situations collapse into this one guard, deliberately.
         //
         // The user switched applications: the identifiers differ, which is the
@@ -365,17 +437,26 @@ enum PasteService {
                 destination: destination,
                 frontmost: frontmostProcess,
                 clipboardWas: clipboardAtCopy,
-                clipboardIs: NSPasteboard.general.changeCount)
+                clipboardIs: NSPasteboard.general.changeCount,
+                own: ownProcess)
     }
 
     /// Which process is in front, for stamping and for checking.
     ///
-    /// Sound as a record of where the *user* is even while the panel has the
-    /// keyboard: Clipvelope is `LSUIElement` and never becomes frontmost, which
-    /// is the measurement `stillHasFocus` records below.
+    /// Sound as a record of where the *user* is while the history panel has the
+    /// keyboard: an `LSUIElement` app does not become frontmost merely by
+    /// showing a window, which is the measurement `stillHasFocus` records below.
+    ///
+    /// It can name Clipvelope all the same, because `NSApp.activate` overrides
+    /// that -- `Views.swift` calls it when Preferences is brought forward and
+    /// for the Delete Everything alert. Callers stamping a destination must
+    /// therefore compare against `ownProcess`; `refusal` does.
     static var frontmostProcess: pid_t? {
         NSWorkspace.shared.frontmostApplication?.processIdentifier
     }
+
+    /// This process. Named here so the rule about it reads as one thing.
+    static var ownProcess: pid_t { ProcessInfo.processInfo.processIdentifier }
 
     private static func waitForFocus(until focusDeadline: Date, postBy postDeadline: Date,
                                      destination: pid_t?, clipboard clipboardAtCopy: Int,
@@ -428,8 +509,11 @@ enum PasteService {
     /// actually answers it here is the first. Measured: with the history panel
     /// open and taking every keystroke the user types, Clipvelope is *not* the
     /// active application and *not* what `frontmostApplication` names -- an
-    /// LSUIElement app does not become frontmost, which is the same fact
-    /// `Views.swift` records about the Settings window. So the only signal that
+    /// LSUIElement app does not become frontmost by showing a window, which is
+    /// the same fact `Views.swift` records about the Settings window. (It does
+    /// become frontmost when something calls `NSApp.activate`, which is why the
+    /// third check below is kept and why `refusal` compares a stamped
+    /// destination against `ownProcess`.) So the only signal that
     /// moves when the panel opens and closes is whether the app has a key
     /// window. The other two stay for the cases this one does not cover: an
     /// ordinary window such as Preferences taking the keyboard back, which is a
@@ -438,7 +522,6 @@ enum PasteService {
     private static var stillHasFocus: Bool {
         if NSApplication.shared.keyWindow != nil { return true }
         if NSRunningApplication.current.isActive { return true }
-        return NSWorkspace.shared.frontmostApplication?.processIdentifier
-            == ProcessInfo.processInfo.processIdentifier
+        return frontmostProcess == ownProcess
     }
 }

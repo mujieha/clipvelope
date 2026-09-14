@@ -130,16 +130,27 @@ final class ClipboardStore: ObservableObject {
             }
             unavailableSlots = GlobalHotkeyCenter.shared.register()
             registerOpenHotkey()
-            // Observed here rather than in an application delegate, because the
-            // thing that has to be flushed is this object's queue and an
-            // `NSApplicationDelegateAdaptor` is built before the store exists,
-            // with no way to reach it. The Quit button calls
-            // `NSApplication.terminate`, which posts this and then exits.
-            terminationObserver = NotificationCenter.default.addObserver(
-                forName: NSApplication.willTerminateNotification, object: nil, queue: .main
-            ) { [weak self] _ in
-                self?.flushPendingWork()
-            }
+        }
+        // Observed here rather than in an application delegate, because the
+        // thing that has to be flushed is this object's queue and an
+        // `NSApplicationDelegateAdaptor` is built before the store exists, with
+        // no way to reach it. The Quit button calls `NSApplication.terminate`,
+        // which posts this and then exits.
+        //
+        // Outside the `enableSystemIntegration` gate, unlike the hotkeys and the
+        // pasteboard poller, for two reasons. Waiting for this store's own
+        // writes to reach this store's own vault is not system integration --
+        // it touches nothing outside the object -- and leaving it inside the
+        // gate meant the whole fix rested on an untested assumption about
+        // `addObserver(forName:object:queue:using:)`, which runs its block
+        // inline only when the posting thread's `OperationQueue.current` is the
+        // one given. If it enqueued instead, the process would exit before the
+        // block ran and this would be a no-op with no symptom. A test can post
+        // the notification now and watch the queue drain.
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.flushPendingWork()
         }
         loadFromStorage()
     }
@@ -712,8 +723,15 @@ final class ClipboardStore: ObservableObject {
         // switching applications takes a person about 300 milliseconds.
         //
         // Read before `close()` rather than after, though the panel does not
-        // move it: an LSUIElement app never becomes frontmost, so this already
-        // names the user's own application while the panel has the keyboard.
+        // move it: an LSUIElement app does not become frontmost by showing a
+        // window, so this already names the user's own application while the
+        // panel has the keyboard.
+        //
+        // It can still name Clipvelope, because `NSApp.activate` overrides that
+        // and `Views.swift` calls it for Preferences and for the Delete
+        // Everything alert. The stamp is left as it is rather than nulled here,
+        // so that `PasteService.refusal` can tell that case apart from "there
+        // was nothing to record" and say the true sentence for it.
         let postBy = Date().addingTimeInterval(PasteService.postWindow)
         let destination = PasteService.frontmostProcess
 

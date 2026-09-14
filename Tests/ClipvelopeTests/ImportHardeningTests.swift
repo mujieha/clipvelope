@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import CryptoKit
 @testable import Clipvelope
 
@@ -750,6 +751,35 @@ final class ImportHardeningTests: XCTestCase {
         // because the flush waited for it.
         XCTAssertEqual(makeStore().items.map(\.searchText),
                        ["the last thing copied before quitting"])
+    }
+
+    /// And through the notification, not only by hand.
+    ///
+    /// The test above calls `flushPendingWork` directly, which proves the flush
+    /// works and nothing about whether quitting ever reaches it. The observer is
+    /// registered with `queue: .main`, and
+    /// `addObserver(forName:object:queue:using:)` runs its block inline only
+    /// when the posting thread's `OperationQueue.current` is that queue; if it
+    /// enqueued instead, `NSApplication.terminate` would post, return, and exit
+    /// the process before the block ever ran -- and the entire fix would be a
+    /// no-op with no symptom at all, since the only evidence is a copy that
+    /// quietly is not there next launch.
+    ///
+    /// So: post it, and read the vault back with a second store that shares
+    /// nothing with the first but the directory. Nothing else drains the first
+    /// store's queue between the copy and the read, so the entry being on disk
+    /// means the notification did the waiting.
+    func testQuittingFlushesThroughTheNotificationThatTriggersIt() {
+        let store = makeStore()
+        store.add(text: "copied a moment before Quit was pressed")
+
+        NotificationCenter.default.post(name: NSApplication.willTerminateNotification,
+                                        object: nil)
+
+        XCTAssertEqual(makeStore().items.map(\.searchText),
+                       ["copied a moment before Quit was pressed"],
+                       "posting willTerminate has to drain the queue before it returns")
+        withExtendedLifetime(store) {}
     }
 
     /// And it is bounded, because a Quit button that hangs is its own bug. A

@@ -43,8 +43,31 @@ final class NoticeHUD {
     private var panel: NoticePanel?
     private var label: NSTextField?
     private var dismissal: DispatchWorkItem?
+    /// Bumped by every `show` and every `dismiss`, and captured by the fade's
+    /// completion handler so a stale one can tell it has been superseded.
+    ///
+    /// Setting `alphaValue` directly does not cancel an `animator()` animation
+    /// already in flight, and the animation group's completion handler runs at
+    /// the end of the group whatever the property now says. Without this token a
+    /// message arriving inside the 250ms fade -- within a quarter second of the
+    /// auto-dismiss firing, or of the user clicking the previous one away -- is
+    /// ordered front, faded to nothing by the animation that was already
+    /// running, and then ordered out by a completion handler that belongs to the
+    /// message it replaced. The dismissal timer afterwards sees an invisible
+    /// panel and does nothing, so the user never reads it -- which is the exact
+    /// failure this whole type exists to remove.
+    private var generation = 0
 
     private init() {}
+
+    /// Whether a fade that has just finished may take the window off screen.
+    ///
+    /// Pure, and separate from the animation, for the same reason
+    /// `PasteService.refusal` is pure: the rule is the fix, and a test cannot
+    /// run a 250ms window-server fade but can check the decision the fade's
+    /// completion handler makes. `started` is the generation the fade captured
+    /// when it began, `current` the one the HUD is on now.
+    static func mayOrderOut(started: Int, current: Int) -> Bool { started == current }
 
     /// Shows `text` for `duration` seconds. A second call replaces the message
     /// and restarts the clock rather than stacking a second panel, so a burst of
@@ -59,7 +82,23 @@ final class NoticeHUD {
         layout(panel)
 
         dismissal?.cancel()
-        panel.alphaValue = 1
+        generation += 1
+        // Both halves are needed, and they fix different things.
+        //
+        // Animating to 1 over zero seconds, rather than assigning `alphaValue`,
+        // because an assignment does not stop an `animator()` animation already
+        // in flight: the fade keeps driving the property and the panel carries
+        // on towards invisible with the new message in it. Starting a new
+        // animation on the same property is what replaces the running one, and a
+        // zero duration makes the replacement instantaneous.
+        //
+        // The token then handles the other half: a replaced animation still runs
+        // its group's completion handler, and that handler orders the window
+        // out.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            panel.animator().alphaValue = 1
+        }
         // `orderFrontRegardless`, not `makeKeyAndOrderFront`: taking the
         // keyboard is the one thing this must never do. It would put a key
         // window back under `PasteService.stillHasFocus`, which reads exactly
@@ -84,11 +123,23 @@ final class NoticeHUD {
         dispatchPrecondition(condition: .onQueue(.main))
         dismissal?.cancel()
         dismissal = nil
+        generation += 1
+        let token = generation
         guard let panel, panel.isVisible else { return }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.fade
             panel.animator().alphaValue = 0
-        }, completionHandler: { panel.orderOut(nil) })
+        }, completionHandler: { [weak self] in
+            // Only if nothing has been asked of the HUD since this fade began.
+            // A `show` inside the fade has already put a new message on screen
+            // and made the panel opaque again; ordering out here would take that
+            // message away a quarter second after it appeared, and the new
+            // dismissal timer would then find an invisible panel and do nothing.
+            guard let self, Self.mayOrderOut(started: token, current: self.generation) else {
+                return
+            }
+            panel.orderOut(nil)
+        })
     }
 
     private func makePanel() -> NoticePanel {
