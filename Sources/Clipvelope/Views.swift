@@ -519,6 +519,12 @@ struct StateStrip: View {
         .frame(maxWidth: .infinity)
         .background(content.degraded ? Color.orange.opacity(0.12)
                                      : Color(NSColor.controlBackgroundColor))
+        // So the store knows whether this strip is on screen to carry a notice,
+        // and can put one below the menu bar instead when it is not. See
+        // `ClipboardStore.noticeNeedsHUD`, which deliberately does not trust
+        // this signal on its own.
+        .onAppear { store.stateStripAppeared() }
+        .onDisappear { store.stateStripDisappeared() }
     }
 }
 

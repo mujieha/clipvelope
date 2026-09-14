@@ -107,6 +107,9 @@ final class ClipboardStore: ObservableObject {
         self.storage = storage
         self.systemIntegrationEnabled = enableSystemIntegration
         self.pasteboard = pasteboard
+        self.noticePresenter = enableSystemIntegration
+            ? { NoticeHUD.shared.show($0, for: ClipboardStore.noticeDuration) }
+            : { _ in }
 
         monitor.onNewContent = { [weak self] captured in
             self?.add(captured.payload, source: captured.sourceBundleID)
@@ -126,14 +129,67 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: Notices
 
-    /// Shown in the state strip for a few seconds. Only for outcomes the user
-    /// would otherwise never learn about.
+    /// How long a notice stays up, on either surface. One number so the strip
+    /// and the panel cannot disagree about when a message expires. Eight rather
+    /// than the old six because every one of these messages is two sentences and
+    /// ends in an instruction.
+    static let noticeDuration: TimeInterval = 8
+
+    /// Where a notice goes when no window is on screen to carry it.
+    ///
+    /// A stored closure rather than a direct call to `NoticeHUD`, for two
+    /// reasons. A test can watch it, which is the only way to hold the line that
+    /// a failed paste reaches the user -- that is the exact thing that was
+    /// broken. And a store built without system integration gets a closure that
+    /// does nothing, so a unit test never puts a window on the screen of the
+    /// machine running it, the same rule the pasteboard poller and the global
+    /// hotkeys follow.
+    var noticePresenter: (String) -> Void
+
+    /// How many state strips are mounted. The strip is the other surface for a
+    /// notice, and there is no point showing both.
+    private var stripsOnScreen = 0
+
+    /// Whether a notice needs the panel, given the two things that can be
+    /// observed about the strip.
+    ///
+    /// Pure, because getting it wrong in one direction is invisible. Showing a
+    /// panel while the strip is also up is a redundant message; *not* showing
+    /// one when the strip is not really there is the original bug back again. So
+    /// the rule demands both signals agree before it stays quiet, and the two
+    /// fail in opposite directions: `stripOnScreen` comes from SwiftUI's
+    /// `onAppear`/`onDisappear`, which can miss the disappearance, and
+    /// `appHasKeyWindow` is the signal `PasteService.stillHasFocus` documents as
+    /// the one that actually moves when the panel opens and closes.
+    static func noticeNeedsHUD(stripOnScreen: Bool, appHasKeyWindow: Bool) -> Bool {
+        !(stripOnScreen && appHasKeyWindow)
+    }
+
+    /// Called by `StateStrip` as it comes and goes.
+    func stateStripAppeared() { stripsOnScreen += 1 }
+    func stateStripDisappeared() { stripsOnScreen = max(0, stripsOnScreen - 1) }
+
+    /// Shown for a few seconds: in the state strip if the history panel is open,
+    /// and in a panel below the menu bar if it is not. Only for outcomes the
+    /// user would otherwise never learn about.
+    ///
+    /// Both, not one. The strip is the better place when the user is already
+    /// looking at the panel, and it is the only place a notice can be read at
+    /// leisure; but the three callers that matter most -- a direct paste, which
+    /// reports after the panel has been dismissed, a Quick Slot, which is a
+    /// global hotkey used with the panel closed, and a missing payload on either
+    /// path -- all speak to someone who is looking somewhere else entirely.
     func showNotice(_ text: String) {
         notice = text
         noticeWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.notice = nil }
         noticeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.noticeDuration, execute: work)
+
+        guard ClipboardStore.noticeNeedsHUD(stripOnScreen: stripsOnScreen > 0,
+                                            appHasKeyWindow: NSApplication.shared.keyWindow != nil)
+        else { return }
+        noticePresenter(text)
     }
 
     // MARK: Shortcuts
@@ -579,43 +635,49 @@ final class ClipboardStore: ObservableObject {
     /// windows or posting keystrokes into the machine running it.
     private func closePanelThenPaste(_ copy: ((() -> Void)?) -> Void) {
         guard systemIntegrationEnabled else { return copy(nil) }
+
+        // Both stamps are taken here, before anything else happens, because both
+        // describe the same instant: the one the user acted in. `postBy` bounds
+        // when the keystroke may still go out; `destination` bounds where. The
+        // deadline alone never bounded the destination -- inside those two
+        // seconds the keystroke went to whatever was frontmost at post time, and
+        // switching applications takes a person about 300 milliseconds.
+        //
+        // Read before `close()` rather than after, though the panel does not
+        // move it: an LSUIElement app never becomes frontmost, so this already
+        // names the user's own application while the panel has the keyboard.
+        let postBy = Date().addingTimeInterval(PasteService.postWindow)
+        let destination = PasteService.frontmostProcess
+
         NSApplication.shared.keyWindow?.close()
         guard pasteDirectly else { return copy(nil) }
-        let postBy = Date().addingTimeInterval(PasteService.postWindow)
         copy({ [weak self] in
-            PasteService.pasteWhenFocusReturns(postBy: postBy) { outcome in
-                self?.report(outcome)
+            guard let self else { return }
+            // Sampled here, in the completion, because here is where the
+            // pasteboard is known to hold the entry. Anything that writes to it
+            // between now and the keystroke -- a Quick Slot command finishing
+            // with `copyText`, or any other application -- moves the count, and
+            // the paste is refused rather than pasting that other thing and
+            // reporting success by saying nothing.
+            let clipboard = pasteboard.changeCount
+            PasteService.pasteWhenFocusReturns(postBy: postBy,
+                                               destination: destination,
+                                               clipboard: clipboard) { outcome in
+                self.report(outcome)
             }
         })
     }
 
-    /// Four outcomes, four answers.
+    /// Six outcomes, six answers -- and `PasteService.Outcome` holds the
+    /// sentences, so a new case cannot compile until someone has written one.
     ///
-    /// A paste that worked says nothing, because the text appearing where the
-    /// user was typing is the message. The other three are situations they
-    /// cannot otherwise tell apart -- and the remedy differs: one needs a
-    /// permission granted, the rest only need Command + V pressed by hand. Every
-    /// message says the entry *was* copied, because in all four cases it was,
-    /// and a user who thinks the copy failed too would go back and choose it
-    /// again.
-    private func report(_ outcome: PasteService.Outcome) {
-        switch outcome {
-        case .pasted:
-            break
-        case .notTrusted:
-            showNotice("Clipvelope has not been allowed to paste for you yet. The entry was "
-                       + "copied, so Command + V will paste it. Preferences explains the rest.")
-        case .failed(.noEvent):
-            showNotice("The entry was copied, but the keystroke that pastes it could not be "
-                       + "sent. Press Command + V to paste it.")
-        case .failed(.focusDidNotReturn):
-            showNotice("The entry was copied, but the window you were in did not take focus "
-                       + "back, so nothing was pasted. Press Command + V to paste it.")
-        case .failed(.tookTooLong):
-            showNotice("The entry was copied, but it took long enough that pasting it might "
-                       + "have put it somewhere you had moved on to, so nothing was pasted. "
-                       + "Press Command + V to paste it where you want it.")
-        }
+    /// The message goes wherever the user is: the state strip if the history
+    /// panel is open, a panel below the menu bar if it is not. The second is the
+    /// one that matters here, because this always runs after the panel has been
+    /// dismissed.
+    func report(_ outcome: PasteService.Outcome) {
+        guard let message = outcome.message else { return }
+        showNotice(message)
     }
 
     /// Loads and caches a small preview for an image item.

@@ -21,6 +21,11 @@ update prompt; `make appcast` takes it from here.
 - VoiceOver reads the panel and Preferences: history rows say what they hold,
   and the icon-only buttons say what they do rather than announcing as
   "button".
+- When something goes wrong while the panel is closed, Clipvelope says so in a
+  small panel below the menu bar, and says what to do about it. Click it to
+  send it away, or leave it and it goes on its own. Nothing is shown when a
+  paste works: the text appearing where you were typing is the message. It
+  needs no notification permission.
 
 ### Better
 
@@ -42,6 +47,16 @@ update prompt; `make appcast` takes it from here.
 - Control + Option + V no longer depends on an internal name inside macOS that
   a system update could change, which would have left the app looking broken
   with no way in.
+- Paste directly now refuses to paste anywhere but the application you were in
+  when you chose the entry. Picking an image or a formatted entry can take a
+  moment, and if you switched apps during it the entry — which may be a
+  password — used to be typed into whatever you had switched to.
+- Paste directly also refuses if something else has taken the clipboard in the
+  meantime, such as a Quick Slot command finishing, instead of pasting that
+  other thing and saying nothing about it.
+- Every message about a paste that did not happen, and every Quick Slot
+  failure, was written into the history panel — which is closed at exactly
+  those moments, so no one ever saw one. They now reach you where you are.
 
 ## 0.1.0
 

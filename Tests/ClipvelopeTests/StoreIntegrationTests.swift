@@ -481,19 +481,14 @@ final class StoreIntegrationTests: XCTestCase {
         let chosen = Date()
         let postBy = chosen.addingTimeInterval(PasteService.postWindow)
 
-        XCTAssertNil(PasteService.refusal(trusted: true, now: chosen, postBy: postBy),
+        XCTAssertNil(refusal(now: chosen, postBy: postBy),
                      "the ordinary case: the user has only just pressed Return")
-        XCTAssertNil(PasteService.refusal(trusted: true,
-                                          now: chosen.addingTimeInterval(PasteService.focusTimeout),
-                                          postBy: postBy),
+        XCTAssertNil(refusal(now: chosen.addingTimeInterval(PasteService.focusTimeout),
+                             postBy: postBy),
                      "a full focus wait must still leave room to post")
-        XCTAssertEqual(PasteService.refusal(trusted: true,
-                                            now: postBy.addingTimeInterval(0.001),
-                                            postBy: postBy),
+        XCTAssertEqual(refusal(now: postBy.addingTimeInterval(0.001), postBy: postBy),
                        .failed(.tookTooLong))
-        XCTAssertEqual(PasteService.refusal(trusted: true,
-                                            now: chosen.addingTimeInterval(30),
-                                            postBy: postBy),
+        XCTAssertEqual(refusal(now: chosen.addingTimeInterval(30), postBy: postBy),
                        .failed(.tookTooLong),
                        "a copy held up for half a minute must never reach the keyboard")
 
@@ -502,13 +497,157 @@ final class StoreIntegrationTests: XCTestCase {
 
         // A permission that was never granted is the more useful thing to say:
         // no deadline would have made that paste happen.
-        XCTAssertEqual(PasteService.refusal(trusted: false,
-                                            now: chosen.addingTimeInterval(30),
-                                            postBy: postBy),
+        XCTAssertEqual(refusal(trusted: false, now: chosen.addingTimeInterval(30), postBy: postBy),
                        .notTrusted)
 
         XCTAssertGreaterThan(PasteService.postWindow, PasteService.focusTimeout,
                              "the window has to outlast the wait it contains")
+    }
+
+    /// The deadline bounds *when* a keystroke goes out and never bounded
+    /// *where*. Inside those two seconds the paste went to whatever was
+    /// frontmost at post time, and a person switches applications in about 300
+    /// milliseconds: pick an image while the I/O queue is busy, Command-Tab
+    /// away, and the entry -- which this app's premise says may be a password --
+    /// is typed into the application they moved to.
+    func testAPasteIsRefusedWhenTheUserIsNoLongerWhereTheyStarted() {
+        let chosen = Date()
+        let postBy = chosen.addingTimeInterval(PasteService.postWindow)
+        let started: pid_t = 501
+
+        XCTAssertNil(refusal(now: chosen, postBy: postBy, destination: started, frontmost: started),
+                     "still in the same application, well inside the window")
+
+        // The case the check exists for: they moved, and the deadline has not
+        // even run out yet, so nothing else would have stopped this.
+        XCTAssertEqual(refusal(now: chosen.addingTimeInterval(0.4), postBy: postBy,
+                               destination: started, frontmost: 777),
+                       .failed(.destinationNotConfirmed))
+
+        // The application they were in quit. Whatever is in front now, it is not
+        // where they meant the entry to go.
+        XCTAssertEqual(refusal(now: chosen, postBy: postBy, destination: started, frontmost: nil),
+                       .failed(.destinationNotConfirmed))
+
+        // Nothing was frontmost when they acted, so there is nothing to confirm
+        // against and posting would be a guess.
+        XCTAssertEqual(refusal(now: chosen, postBy: postBy, destination: nil, frontmost: started),
+                       .failed(.destinationNotConfirmed))
+        XCTAssertEqual(refusal(now: chosen, postBy: postBy, destination: nil, frontmost: nil),
+                       .failed(.destinationNotConfirmed))
+
+        // Same application, different window: allowed on purpose. NSWorkspace
+        // names a process, not a window, and the user's own Command + V would
+        // land in that same window anyway.
+        XCTAssertNil(refusal(now: chosen, postBy: postBy, destination: started, frontmost: started))
+
+        XCTAssertNotEqual(PasteService.Outcome.failed(.destinationNotConfirmed),
+                          .failed(.tookTooLong),
+                          "a move that was observed and a delay that merely suggests one "
+                          + "are different situations and must not read the same")
+
+        // The observed move is the more useful sentence when both are true: the
+        // deadline only ever inferred what this one measured.
+        XCTAssertEqual(refusal(now: chosen.addingTimeInterval(30), postBy: postBy,
+                               destination: started, frontmost: 777),
+                       .failed(.destinationNotConfirmed))
+    }
+
+    /// Nothing checked that the pasteboard still held what was copied.
+    /// `runShellAndCopy` finishes on the main queue at an arbitrary later
+    /// moment, so a Quick Slot command completing inside the window replaced the
+    /// chosen entry with its own output -- and the app reported success by
+    /// saying nothing.
+    func testAPasteIsRefusedWhenSomethingElseTookTheClipboard() {
+        let chosen = Date()
+        let postBy = chosen.addingTimeInterval(PasteService.postWindow)
+
+        XCTAssertNil(refusal(now: chosen, postBy: postBy, clipboardWas: 12, clipboardIs: 12))
+        XCTAssertEqual(refusal(now: chosen, postBy: postBy, clipboardWas: 12, clipboardIs: 13),
+                       .failed(.clipboardChanged))
+
+        // Ahead of the deadline and the destination, because both of their
+        // messages end "press Command + V", and that is only sound advice while
+        // the clipboard still holds the entry.
+        XCTAssertEqual(refusal(now: chosen.addingTimeInterval(30), postBy: postBy,
+                               destination: 501, frontmost: 777,
+                               clipboardWas: 12, clipboardIs: 13),
+                       .failed(.clipboardChanged))
+
+        XCTAssertEqual(PasteService.Outcome.failed(.clipboardChanged).message?
+            .contains("Choose the entry again"), true,
+                       "the one outcome whose remedy is not Command + V has to say so")
+    }
+
+    /// Every outcome has to have something to say, or nothing at all as a
+    /// choice rather than an oversight -- and no two of them may say the same
+    /// thing, which is the rule the whole enum exists to keep.
+    func testEveryPasteOutcomeHasItsOwnAnswer() {
+        let silent = PasteService.Outcome.pasted
+        XCTAssertNil(silent.message,
+                     "a paste that worked says nothing: the text appearing is the message")
+
+        let spoken: [PasteService.Outcome] = [
+            .notTrusted, .failed(.noEvent), .failed(.focusDidNotReturn), .failed(.tookTooLong),
+            .failed(.destinationNotConfirmed), .failed(.clipboardChanged)
+        ]
+        let messages = spoken.compactMap(\.message)
+        XCTAssertEqual(messages.count, spoken.count, "every failure has to say something")
+        XCTAssertEqual(Set(messages).count, spoken.count,
+                       "two different situations must not look the same to the user")
+        for message in messages {
+            XCTAssertGreaterThan(message.count, 40, "a remedy takes a sentence: \(message)")
+        }
+    }
+
+    /// The messages went to `ClipboardStore.notice`, which only the state strip
+    /// inside the history panel reads -- and every one of them is written after
+    /// that panel has been closed, or by a Quick Slot that is only ever used
+    /// with it closed. So they were written to a view that did not exist.
+    func testAFailedPasteReachesTheUserWithThePanelClosed() {
+        let store = makeStore()
+        var shown: [String] = []
+        store.noticePresenter = { shown.append($0) }
+
+        store.report(.pasted)
+        XCTAssertEqual(shown, [], "success is quiet")
+
+        store.report(.failed(.destinationNotConfirmed))
+        XCTAssertEqual(shown.count, 1, "a failed paste has to reach a surface the user can see")
+        XCTAssertEqual(shown.first, PasteService.Outcome.failed(.destinationNotConfirmed).message)
+        XCTAssertEqual(store.notice, shown.first,
+                       "and the strip still carries it for a user who does open the panel")
+
+        // The two pre-existing messages that rode the same dead channel.
+        store.showNotice("Quick Slot command could not start; the clipboard was left alone.")
+        XCTAssertEqual(shown.count, 2)
+    }
+
+    /// Which surface a notice goes to. Getting this wrong in one direction is a
+    /// redundant message; in the other it is the silent failure back again, so
+    /// the rule stays quiet only when both signals agree the strip is there.
+    func testANoticeOnlySkipsThePanelWhenTheStripIsCertainlyOnScreen() {
+        XCTAssertFalse(ClipboardStore.noticeNeedsHUD(stripOnScreen: true, appHasKeyWindow: true),
+                       "the history panel is open and its strip is showing the message")
+        XCTAssertTrue(ClipboardStore.noticeNeedsHUD(stripOnScreen: false, appHasKeyWindow: false),
+                      "the ordinary failed paste: nothing of Clipvelope's is on screen")
+        XCTAssertTrue(ClipboardStore.noticeNeedsHUD(stripOnScreen: true, appHasKeyWindow: false),
+                      "SwiftUI missed the disappearance; the panel is gone all the same")
+        XCTAssertTrue(ClipboardStore.noticeNeedsHUD(stripOnScreen: false, appHasKeyWindow: true),
+                      "Preferences has the keyboard, and it has no strip to show anything in")
+    }
+
+    /// Named arguments with defaults, so each test says only what it is about.
+    private func refusal(trusted: Bool = true,
+                         now: Date,
+                         postBy: Date,
+                         destination: pid_t? = 501,
+                         frontmost: pid_t? = 501,
+                         clipboardWas: Int = 7,
+                         clipboardIs: Int = 7) -> PasteService.Outcome? {
+        PasteService.refusal(trusted: trusted, now: now, postBy: postBy,
+                             destination: destination, frontmost: frontmost,
+                             clipboardWas: clipboardWas, clipboardIs: clipboardIs)
     }
 
     func testIgnoredAppsPersistAndDeduplicate() {

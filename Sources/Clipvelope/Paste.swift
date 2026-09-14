@@ -36,7 +36,7 @@ enum PasteService {
         case notTrusted
         case failed(Reason)
 
-        /// Why a trusted paste still did not happen. Three genuinely different
+        /// Why a trusted paste still did not happen. Five genuinely different
         /// faults that must not be reported with one message.
         enum Reason: Equatable {
             /// CoreGraphics would not hand over an event to post.
@@ -51,6 +51,62 @@ enum PasteService {
             /// time to move somewhere else, and posting would type the entry
             /// into whatever they moved to.
             case tookTooLong
+            /// The application in front when the user chose the entry is not
+            /// the one in front now -- or there was none to record. Not the
+            /// same fault as `tookTooLong`, which only infers from elapsed time
+            /// that the user *may* have moved: this is the move itself,
+            /// observed. A paste inside the deadline still lands in the wrong
+            /// application if the user switched during it, and a switch takes
+            /// about 300ms against a two-second window.
+            case destinationNotConfirmed
+            /// Something replaced the entry on the clipboard between the copy
+            /// and the keystroke -- a Quick Slot command finishing, or any
+            /// other application writing to the pasteboard. Posting now would
+            /// paste that other thing while the app reported success by saying
+            /// nothing. Its own case because its remedy is the only one that
+            /// differs: Command + V will not help, the entry has to be chosen
+            /// again.
+            case clipboardChanged
+        }
+
+        /// What to tell the user, or `nil` when there is nothing to say.
+        ///
+        /// Here rather than in the store so that adding a case to `Reason`
+        /// cannot compile until someone has written the sentence for it. A
+        /// silent outcome has to be chosen, not forgotten.
+        ///
+        /// A paste that worked says nothing, because the text appearing where
+        /// the user was typing is the message. Every other message says the
+        /// entry *was* copied where that is still true, because a user who
+        /// thinks the copy failed as well would go back and choose it again --
+        /// and `clipboardChanged` is exactly the case where it is no longer
+        /// true, so it says the opposite.
+        var message: String? {
+            switch self {
+            case .pasted:
+                return nil
+            case .notTrusted:
+                return "Clipvelope has not been allowed to paste for you yet. The entry was "
+                    + "copied, so Command + V will paste it. Preferences explains the rest."
+            case .failed(.noEvent):
+                return "The entry was copied, but the keystroke that pastes it could not be "
+                    + "sent. Press Command + V to paste it."
+            case .failed(.focusDidNotReturn):
+                return "The entry was copied, but the window you were in did not take focus "
+                    + "back, so nothing was pasted. Press Command + V to paste it."
+            case .failed(.tookTooLong):
+                return "The entry was copied, but it took long enough that pasting it might "
+                    + "have put it somewhere you had moved on to, so nothing was pasted. "
+                    + "Press Command + V to paste it where you want it."
+            case .failed(.destinationNotConfirmed):
+                return "The entry was copied, but Clipvelope could not confirm you were still "
+                    + "in the application you started in, so nothing was pasted. Press "
+                    + "Command + V to paste it where you want it."
+            case .failed(.clipboardChanged):
+                return "The entry was copied, but something else replaced it on the clipboard "
+                    + "before it could be pasted, so nothing was pasted and the clipboard now "
+                    + "holds that other thing. Choose the entry again."
+            }
         }
     }
 
@@ -151,7 +207,21 @@ enum PasteService {
     @discardableResult
     static func paste() -> Outcome {
         guard isTrusted else { return .notTrusted }
-        guard let source = CGEventSource(stateID: .combinedSessionState),
+        // `.privateState`, not `.combinedSessionState`, and the difference
+        // matters for exactly one key: the one the user may still be holding.
+        //
+        // A combined-session source carries the session's live modifier state,
+        // which includes whatever is physically down right now. "Copy as Plain
+        // Text" is Option + Return, and for a formatted entry the copy is
+        // synchronous, so the post happens roughly `settleDelay` after the
+        // key-down -- 50ms, far inside the time anyone holds a modifier. The
+        // event would then go out as Command + Option + V, which in Finder is
+        // Move Item Here, and the `.files` content case really does put file
+        // URLs on the pasteboard. A private state table starts empty and is
+        // changed only by events this source posts, so nothing the user's own
+        // hands are doing can be folded in. The explicit `flags` assignments
+        // below then say exactly which modifiers this keystroke carries.
+        guard let source = CGEventSource(stateID: .privateState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKeyV, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKeyV, keyDown: false)
         else { return .failed(.noEvent) }
@@ -192,20 +262,34 @@ enum PasteService {
     /// answers "has the user moved on since". `ClipboardStore` stamps it before
     /// the copy it hangs this off.
     ///
+    /// `destination` is the process the user was in when they acted, from
+    /// `frontmostProcess`, and bounds *where* the keystroke may go in the same
+    /// way `postBy` bounds when. `clipboard` is `NSPasteboard.changeCount`
+    /// sampled once the copy had landed, and bounds *what* is pasted; it is
+    /// compared against the general pasteboard, because that is the one a
+    /// keystroke pastes from whatever the store was handed. Neither has a
+    /// default, for the same reason `postBy` no longer has one: the old default
+    /// was `Date().addingTimeInterval(postWindow)` evaluated at call time, which
+    /// quietly rebuilt the bug it was added to fix for any caller that omitted
+    /// it.
+    ///
     /// `completion` runs on the main queue.
-    static func pasteWhenFocusReturns(postBy postDeadline: Date
-                                        = Date().addingTimeInterval(postWindow),
+    static func pasteWhenFocusReturns(postBy postDeadline: Date,
+                                      destination: pid_t?,
+                                      clipboard clipboardAtCopy: Int,
                                       timeout: TimeInterval = focusTimeout,
                                       completion: @escaping (Outcome) -> Void) {
         // Checked before the wait as well as inside `paste()`, so an ungranted
         // permission -- or a deadline already gone -- is reported at once
         // instead of after half a second of watching for a focus change that
         // would not have helped.
-        if let refusal = refusal(trusted: isTrusted, now: Date(), postBy: postDeadline) {
+        if let refusal = refusalNow(postBy: postDeadline, destination: destination,
+                                    clipboard: clipboardAtCopy) {
             return completion(refusal)
         }
-        waitForFocus(until: Date().addingTimeInterval(timeout),
-                     postBy: postDeadline, completion: completion)
+        waitForFocus(until: Date().addingTimeInterval(timeout), postBy: postDeadline,
+                     destination: destination, clipboard: clipboardAtCopy,
+                     completion: completion)
     }
 
     /// Everything that has to be true for a keystroke to go out, in one place
@@ -213,33 +297,128 @@ enum PasteService {
     /// the outcome to report instead.
     ///
     /// Pure on purpose. `paste()` synthesises a real Command + V into whatever
-    /// the machine is doing, so a test may not call it -- and the deadline is
-    /// exactly the part that most needs testing. Keeping the decision here means
-    /// the production path has one gate rather than two scattered checks, and
-    /// the test drives the same code the app does.
-    static func refusal(trusted: Bool, now: Date, postBy postDeadline: Date) -> Outcome? {
+    /// the machine is doing, so a test may not call it -- and the deadline, the
+    /// destination and the clipboard are exactly the parts that most need
+    /// testing. Keeping the decision here means the production path has one gate
+    /// rather than several scattered checks, and the test drives the same code
+    /// the app does.
+    ///
+    /// The order is the order of the sentences the user would get.
+    /// `notTrusted` comes first because it is a statement about how the app is
+    /// set up rather than about this attempt, and no deadline or destination
+    /// would have made that paste happen. Then the clipboard, because every
+    /// remaining message ends "press Command + V", which is only sound advice
+    /// while the clipboard still holds the entry. Then the destination, which
+    /// is a move that was *observed*, ahead of the deadline, which only infers
+    /// from elapsed time that a move may have happened.
+    ///
+    /// - Parameters:
+    ///   - destination: the frontmost process when the user chose the entry,
+    ///     `nil` if there was none to record.
+    ///   - frontmost: the frontmost process now, `nil` if there is none.
+    ///   - clipboardWas: `NSPasteboard.changeCount` just after the copy landed.
+    ///   - clipboardIs: `NSPasteboard.changeCount` now.
+    static func refusal(trusted: Bool,
+                        now: Date,
+                        postBy postDeadline: Date,
+                        destination: pid_t?,
+                        frontmost: pid_t?,
+                        clipboardWas: Int,
+                        clipboardIs: Int) -> Outcome? {
         guard trusted else { return .notTrusted }
+        guard clipboardWas == clipboardIs else { return .failed(.clipboardChanged) }
+        // Three situations collapse into this one guard, deliberately.
+        //
+        // The user switched applications: the identifiers differ, which is the
+        // case the whole check exists for. The application they were in quit:
+        // `frontmost` is some other process or `nil`, and either way it is not
+        // the one they chose the entry from, so refusing is right. And there
+        // was no frontmost application to record at all: `destination` is nil,
+        // so there is nothing to confirm against and posting would be a guess.
+        // The message is worded for all three -- "could not confirm" is true of
+        // each, where "you switched applications" would be a lie in the last
+        // two.
+        //
+        // The case this guard deliberately lets through is the same application
+        // with a different window in front. `NSWorkspace` names a process, not
+        // a window, and asking which window has focus means an Accessibility
+        // round trip into that application's main thread, which can block on an
+        // application that is busy -- the very failure mode the rest of this
+        // file is built to avoid. It is also much the smaller mistake: the
+        // user's own Command + V would land in that same window.
+        guard let destination, destination == frontmost else {
+            return .failed(.destinationNotConfirmed)
+        }
         guard now < postDeadline else { return .failed(.tookTooLong) }
         return nil
     }
 
+    /// The same decision against the machine as it is right now. The one place
+    /// the live readings are taken, so every gate on the path asks the same
+    /// questions.
+    private static func refusalNow(postBy postDeadline: Date,
+                                   destination: pid_t?,
+                                   clipboard clipboardAtCopy: Int) -> Outcome? {
+        refusal(trusted: isTrusted,
+                now: Date(),
+                postBy: postDeadline,
+                destination: destination,
+                frontmost: frontmostProcess,
+                clipboardWas: clipboardAtCopy,
+                clipboardIs: NSPasteboard.general.changeCount)
+    }
+
+    /// Which process is in front, for stamping and for checking.
+    ///
+    /// Sound as a record of where the *user* is even while the panel has the
+    /// keyboard: Clipvelope is `LSUIElement` and never becomes frontmost, which
+    /// is the measurement `stillHasFocus` records below.
+    static var frontmostProcess: pid_t? {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
     private static func waitForFocus(until focusDeadline: Date, postBy postDeadline: Date,
+                                     destination: pid_t?, clipboard clipboardAtCopy: Int,
                                      completion: @escaping (Outcome) -> Void) {
         guard stillHasFocus else {
             DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) {
                 // Asked again here, not only on the way in: the focus wait and
                 // the settle delay are themselves time, and this is the last
                 // instant before the keystroke becomes irretrievable.
-                if let refusal = refusal(trusted: isTrusted, now: Date(), postBy: postDeadline) {
+                if let refusal = refusalNow(postBy: postDeadline, destination: destination,
+                                            clipboard: clipboardAtCopy) {
                     return completion(refusal)
                 }
+                // And focus again, which the first version of this block did
+                // not do -- it called this the last instant before the keystroke
+                // becomes irretrievable and then checked two of its three
+                // conditions. Clipvelope can take the keyboard back inside these
+                // 50 milliseconds: the open-history hotkey pressed a second
+                // time, or Preferences coming forward. Command + V would then
+                // type the chosen entry, which this app's own premise says may
+                // be a password, into the panel's search field, where it is
+                // visible on screen and used as a filter.
+                guard !stillHasFocus else { return completion(.failed(.focusDidNotReturn)) }
                 completion(paste())
             }
             return
         }
-        guard Date() < focusDeadline else { return completion(.failed(.focusDidNotReturn)) }
+        guard Date() < focusDeadline else {
+            // The deadline before the focus failure. This branch used to return
+            // without consulting `postBy` at all, so a copy that landed at 1.8s
+            // and a panel that never let go reported "the window did not take
+            // focus back" at 2.3s, when what had actually run out was the
+            // window in which posting anywhere was still safe.
+            if let refusal = refusalNow(postBy: postDeadline, destination: destination,
+                                        clipboard: clipboardAtCopy) {
+                return completion(refusal)
+            }
+            return completion(.failed(.focusDidNotReturn))
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + pollInterval) {
-            waitForFocus(until: focusDeadline, postBy: postDeadline, completion: completion)
+            waitForFocus(until: focusDeadline, postBy: postDeadline,
+                         destination: destination, clipboard: clipboardAtCopy,
+                         completion: completion)
         }
     }
 
