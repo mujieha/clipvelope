@@ -319,26 +319,106 @@ final class ImportHardeningTests: XCTestCase {
     }
 
     func testAnImportedPayloadThatIsNotWhatItsItemClaimsIsLeftOut() throws {
-        let id = UUID()
+        let png = compressiblePNG(width: 4, height: 4)
         let image = ClipboardContent.image(.init(pixelWidth: 2, pixelHeight: 2,
-                                                 byteCount: 10, typeIdentifier: "public.png"))
+                                                 byteCount: png.count, typeIdentifier: "public.png"))
         XCTAssertFalse(ClipboardStore.payloadIsAcceptable(Data("not a png".utf8), for: image))
-        XCTAssertTrue(ClipboardStore.payloadIsAcceptable(compressiblePNG(width: 4, height: 4), for: image))
+        XCTAssertTrue(ClipboardStore.payloadIsAcceptable(png, for: image))
 
-        let rich = ClipboardContent.richText(.init(plainText: "hi", byteCount: 2, typeIdentifier: "public.rtf"))
-        XCTAssertTrue(ClipboardStore.payloadIsAcceptable(Data("{\\rtf1}".utf8), for: rich))
+        let rtf = Data("{\\rtf1}".utf8)
+        let rich = ClipboardContent.richText(.init(plainText: "hi", byteCount: rtf.count,
+                                                   typeIdentifier: "public.rtf"))
+        XCTAssertTrue(ClipboardStore.payloadIsAcceptable(rtf, for: rich))
         XCTAssertFalse(ClipboardStore.payloadIsAcceptable(
             Data(count: ClipboardContent.RichTextInfo.maxBytes + 1), for: rich))
 
         // Neither of these keeps a payload file at all.
         XCTAssertFalse(ClipboardStore.payloadIsAcceptable(Data([1]), for: .text("x")))
         XCTAssertFalse(ClipboardStore.payloadIsAcceptable(Data([1]), for: .files([.init(path: "/tmp/x")])))
-        _ = id
+    }
+
+    /// `byteCount` is a claim like any other, and until now it was the one claim
+    /// nothing compared against the bytes -- only clamped on decode. Three things
+    /// downstream believe it: whether the payload is carried into the backups the
+    /// user makes from then on, the byte budget that decides what gets evicted,
+    /// and whether the file is deleted when its row goes. So a backup could file
+    /// a real picture under `byteCount: 0` and have it excluded from every future
+    /// backup, uncounted by the budget and undeletable by the vault.
+    func testAPayloadIsRefusedWhenItsItemMisdeclaresHowManyBytesItIs() {
+        let png = compressiblePNG(width: 4, height: 4)
+        func image(_ bytes: Int) -> ClipboardContent {
+            .image(.init(pixelWidth: 4, pixelHeight: 4, byteCount: bytes,
+                         typeIdentifier: "public.png"))
+        }
+        XCTAssertTrue(ClipboardStore.payloadIsAcceptable(png, for: image(png.count)),
+                      "an honest declaration is what every backup this app writes carries")
+        XCTAssertFalse(ClipboardStore.payloadIsAcceptable(png, for: image(0)))
+        XCTAssertFalse(ClipboardStore.payloadIsAcceptable(png, for: image(png.count - 1)))
+        XCTAssertFalse(ClipboardStore.payloadIsAcceptable(png, for: image(png.count + 1)))
+
+        let rtf = Data("{\\rtf1 formatted}".utf8)
+        func rich(_ bytes: Int) -> ClipboardContent {
+            .richText(.init(plainText: "formatted", byteCount: bytes, typeIdentifier: "public.rtf"))
+        }
+        XCTAssertTrue(ClipboardStore.payloadIsAcceptable(rtf, for: rich(rtf.count)))
+        XCTAssertFalse(ClipboardStore.payloadIsAcceptable(rtf, for: rich(0)))
+    }
+
+    /// And end to end: the entry goes, rather than arriving as a row the vault
+    /// would then mismanage.
+    func testAnImageDeclaringNoBytesDoesNotReachTheVault() throws {
+        let store = makeStore()
+        let id = UUID()
+        let png = compressiblePNG(width: 4, height: 4)
+        var state = AppState.empty
+        state.items = [
+            ClipboardItem(id: id, createdAt: Date(), isPinned: false,
+                          content: .image(.init(pixelWidth: 4, pixelHeight: 4,
+                                                byteCount: 0, typeIdentifier: "public.png")),
+                          sourceBundleID: nil),
+            ClipboardItem(text: "an ordinary snippet"),
+        ]
+        let url = root.appendingPathComponent("weightless.cvb")
+        try writeBackup(state, to: url, password: "pw", payloads: [id.uuidString: png])
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertEqual(store.items.map(\.searchText), ["an ordinary snippet"])
+        XCTAssertTrue(store.importNotice?.contains("did not match") ?? false,
+                      "got: \(store.importNotice ?? "nil")")
     }
 
     // MARK: - What one backup may install
 
-    func testAnImportIsCappedSoAPinnedFloodCannotGrowTheVaultForever() throws {
+    /// The property, stated once and asserted everywhere an import can happen:
+    /// whatever a backup did to the vault, the next thing the user copies is
+    /// still recorded.
+    ///
+    /// It is the invariant rather than a count because the count is an
+    /// implementation detail and the promise is not. The app exists to keep what
+    /// you copied; a vault it can no longer add to is the product switched off.
+    private func assertACopyIsStillRecorded(_ store: ClipboardStore,
+                                            _ message: String,
+                                            file: StaticString = #filePath,
+                                            line: UInt = #line) {
+        for round in 1...3 {
+            let text = "copied after the import, \(round)"
+            store.add(text: text)
+            settle(store)
+            XCTAssertEqual(store.items.first?.searchText, text,
+                           "\(message) (round \(round))", file: file, line: line)
+        }
+    }
+
+    /// A backup of 201-or-more entries, every one of them pinned, used to leave
+    /// a vault that was over the live cap with nothing the cap was allowed to
+    /// evict. The next copy went in at index 0, came straight back out as the
+    /// only eviction candidate, and `add` returned having recorded nothing --
+    /// for that copy and every copy after it, with no notice, no failure and no
+    /// log line. `isPinned` is a plain boolean in the file, so writing one cost
+    /// an attacker nothing.
+    func testAPinnedFloodCannotStopTheAppRecordingWhatIsCopiedNext() throws {
         let store = makeStore()
         var state = AppState.empty
         state.items = (0..<(ClipboardStore.maxImportedItems + 50)).map {
@@ -351,7 +431,80 @@ final class ImportHardeningTests: XCTestCase {
         store.importBackup(from: url, password: "pw")
         settle(store)
 
-        XCTAssertEqual(store.items.count, ClipboardStore.maxImportedItems)
+        XCTAssertEqual(store.items.count, ClipboardStore.maxImportedItems,
+                       "the entries themselves are still kept, up to the import ceiling")
+        XCTAssertEqual(store.items.filter(\.isPinned).count,
+                       ClipboardStore.maxImportedPinnedItems,
+                       "but no more of them may stay pinned than the live cap can carry")
+        XCTAssertTrue(store.importNotice?.contains("pinned") ?? false,
+                      "and the user is told, got: \(store.importNotice ?? "nil")")
+
+        assertACopyIsStillRecorded(store, "a pinned flood must not stop capture")
+    }
+
+    /// The same flood in a backup this Mac's own key sealed, which is trusted
+    /// and therefore never disarmed. Nothing caps the pins here, so the history
+    /// policy is on its own -- and that is the layer that also rescues a vault
+    /// already saturated before this version shipped.
+    func testADeviceBoundRestoreOfAFullyPinnedVaultStillRecordsTheNextCopy() throws {
+        let store = makeStore()
+        var state = AppState.empty
+        state.items = (0..<(ClipboardStore.maxItems + 50)).map {
+            ClipboardItem(id: UUID(), createdAt: Date(), isPinned: true,
+                          content: .text("mine \($0)"), sourceBundleID: nil)
+        }
+        let url = root.appendingPathComponent("mine-flood.cvb")
+        try writeBackup(state, to: url, password: nil)
+
+        store.importBackup(from: url, password: nil)
+        settle(store)
+
+        XCTAssertEqual(store.items.filter(\.isPinned).count, ClipboardStore.maxItems + 50,
+                       "a trusted backup is the user's own data and keeps its pins")
+
+        assertACopyIsStillRecorded(store, "a restore of the user's own vault must not stop capture")
+        XCTAssertEqual(store.items.filter { !$0.isPinned }.count, 1,
+                       "and the history settles one row above the cap rather than climbing")
+    }
+
+    /// Both blockers predate 0.2.0, so some vaults are already in this state and
+    /// no import-side rule can reach them. This is such a vault, written to disk
+    /// and then opened.
+    func testAVaultAlreadySaturatedWithPinnedEntriesRecordsACopyAgain() throws {
+        let storage = EncryptedStorage(directory: root.appendingPathComponent("vault"),
+                                       keyStore: FixedKeyStore(seed: 1))
+        var state = AppState.empty
+        state.items = (0..<(ClipboardStore.maxItems + 20)).map {
+            ClipboardItem(id: UUID(), createdAt: Date(), isPinned: true,
+                          content: .text("pinned \($0)"), sourceBundleID: nil)
+        }
+        try storage.saveIndex(state)
+
+        let store = makeStore()
+        XCTAssertEqual(store.items.count, ClipboardStore.maxItems + 20,
+                       "precondition: the vault loads exactly as it stood")
+
+        assertACopyIsStillRecorded(store, "an existing saturated vault must start recording again")
+    }
+
+    /// The ordinary case the cap above must not disturb: a backup with a
+    /// sensible number of pins keeps every one of them.
+    func testAnOrdinaryBackupKeepsItsPins() throws {
+        let store = makeStore()
+        var state = AppState.empty
+        state.items = (0..<10).map {
+            ClipboardItem(id: UUID(), createdAt: Date(), isPinned: $0 < 3,
+                          content: .text("entry \($0)"), sourceBundleID: nil)
+        }
+        let url = root.appendingPathComponent("ordinary.cvb")
+        try writeBackup(state, to: url, password: "pw")
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertEqual(store.items.filter(\.isPinned).count, 3)
+        XCTAssertNil(store.importNotice, "and nothing was changed to report")
+        assertACopyIsStillRecorded(store, "the ordinary case must go on working")
     }
 
     func testAnOversizedEntryIsLeftOutOfAnImport() throws {
@@ -522,6 +675,96 @@ final class ImportHardeningTests: XCTestCase {
                                      keyStore: FixedKeyStore(seed: 1))
         XCTAssertFalse(FileManager.default.fileExists(atPath: vault.payloadURL(for: id).path),
                        "no payload file may be written for a snapshot that is refused")
+    }
+
+    // MARK: - Importing into a vault that cannot be read
+
+    /// The recovery path: the vault is unreadable, writes are suspended, and the
+    /// user imports a backup to get their history back.
+    ///
+    /// The quarantine takes `items/` along with the index, deliberately -- an
+    /// index kept without its payloads is an index whose pictures the next
+    /// launch's orphan sweep deletes. But the import used to write the restored
+    /// payloads into `items/` before that move, so the quarantine swallowed the
+    /// very files it had just restored and every picture came back broken,
+    /// deleting itself on the first click with "That image's file was missing".
+    ///
+    /// Both halves are asserted here, because fixing one by giving up the other
+    /// is no fix: the restored payloads must be readable, and the old ones must
+    /// still be sitting in their quarantine directory.
+    func testImportingIntoASuspendedVaultKeepsItsPayloadsAndTheOldOnesToo() throws {
+        let vaultDirectory = root.appendingPathComponent("vault")
+        let storage = EncryptedStorage(directory: vaultDirectory, keyStore: FixedKeyStore(seed: 1))
+        let older = UUID()
+        try storage.writePayload(Data("the picture that was already here".utf8), for: older)
+        // What a locked Keychain or a damaged file looks like from here.
+        try Data("this is not a sealed box".utf8).write(to: storage.indexURL)
+
+        let store = makeStore()
+        XCTAssertTrue(store.writesSuspended, "precondition: the vault could not be read")
+
+        let id = UUID()
+        let png = compressiblePNG(width: 8, height: 8)
+        var state = AppState.empty
+        state.items = [ClipboardItem(
+            id: id, createdAt: Date(), isPinned: false,
+            content: .image(.init(pixelWidth: 8, pixelHeight: 8, byteCount: png.count,
+                                  typeIdentifier: "public.png",
+                                  contentHash: ClipboardContent.digest(png))),
+            sourceBundleID: nil)]
+        let url = root.appendingPathComponent("recovery.cvb")
+        try writeBackup(state, to: url, password: "pw", payloads: [id.uuidString: png])
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertFalse(store.writesSuspended, "a successful import clears the suspension")
+        XCTAssertEqual(store.items.count, 1)
+        XCTAssertEqual(try storage.readPayload(for: id), png,
+                       "the picture the import just restored must still be there")
+
+        let quarantined = try FileManager.default
+            .contentsOfDirectory(at: vaultDirectory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("items.unreadable-") }
+        XCTAssertEqual(quarantined.count, 1, "the old payload directory was moved aside, once")
+        let kept = try XCTUnwrap(quarantined.first)
+            .appendingPathComponent("\(older.uuidString).cvi")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: kept.path),
+                      "and what it held is still on disk, which is what the quarantine is for")
+    }
+
+    // MARK: - Quitting
+
+    /// `add` enqueues the payload and `persist` the index onto a `.utility`
+    /// queue, and `NSApplication.terminate` waits for neither: the last copy
+    /// died with the process while the strip had already said the vault held it.
+    /// Nothing in the app called `drainPendingWork`, and there was no
+    /// application delegate to call it from.
+    func testQuittingWaitsForTheLastCopyToReachTheVault() {
+        let store = makeStore()
+        store.add(text: "the last thing copied before quitting")
+
+        XCTAssertTrue(store.flushPendingWork(timeout: 10))
+
+        // Nothing else has drained the queue, so if the index is on disk it is
+        // because the flush waited for it.
+        XCTAssertEqual(makeStore().items.map(\.searchText),
+                       ["the last thing copied before quitting"])
+    }
+
+    /// And it is bounded, because a Quit button that hangs is its own bug. A
+    /// password export is the slowest thing the queue does -- key derivation is
+    /// deliberately expensive -- so with one in front of it a zero-length
+    /// deadline cannot be met.
+    func testTheQuitFlushGivesUpRatherThanHangingOnAQueueThatIsBusy() {
+        let store = makeStore()
+        store.add(text: "something to export")
+        store.exportBackup(to: root.appendingPathComponent("slow.cvb"), password: "pw")
+
+        XCTAssertFalse(store.flushPendingWork(timeout: 0),
+                       "a deadline already past must return rather than wait")
+        XCTAssertTrue(store.flushPendingWork(timeout: 30),
+                      "and the work itself still finishes")
     }
 
     func testRemovingDuplicateIDsKeepsTheFirstOccurrence() {

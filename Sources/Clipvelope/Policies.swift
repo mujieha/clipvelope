@@ -32,7 +32,9 @@ enum HistoryPolicy {
         items.insert(ClipboardItem(id: id, createdAt: now, isPinned: false,
                                    content: content, sourceBundleID: source),
                      at: 0)
-        return trimmed(items, maxItems: maxItems, maxPayloadBytes: maxPayloadBytes)
+        // `keeping:` is the whole reason a copy cannot be lost to a full vault.
+        // See `trimmed`.
+        return trimmed(items, maxItems: maxItems, maxPayloadBytes: maxPayloadBytes, keeping: id)
     }
 
     static func inserting(_ text: String,
@@ -49,14 +51,31 @@ enum HistoryPolicy {
     ///
     /// The byte budget exists because image payloads are unbounded in a way text
     /// never was: a count-based cap alone would happily hold 200 screenshots.
+    ///
+    /// `keeping` names one entry that may not be evicted, and `inserting` passes
+    /// the entry it has just added. Without it the pin exemption eats the newest
+    /// copy: in a vault already at the cap with every other row pinned, the entry
+    /// that went in at index 0 is the only eviction candidate there is, so it is
+    /// removed, the array comes back exactly as it went in, and `add` returns
+    /// having recorded nothing -- for that copy and every copy after it, silently.
+    /// A backup of 201 pinned entries was enough to arrange that; so was pinning
+    /// 200 rows by hand.
+    ///
+    /// Keeping it cannot make the history grow without bound. At most one
+    /// unevictable non-pinned row exists at a time: the next copy protects
+    /// *itself* instead, which makes its predecessor an ordinary candidate
+    /// again. So a vault whose pinned rows already fill the cap settles at one
+    /// row above it rather than climbing.
     static func trimmed(_ items: [ClipboardItem],
                         maxItems: Int,
-                        maxPayloadBytes: Int = .max) -> [ClipboardItem] {
+                        maxPayloadBytes: Int = .max,
+                        keeping protected: UUID? = nil) -> [ClipboardItem] {
         var items = items
         var payloadBytes = items.reduce(0) { $0 + $1.payloadByteCount }
 
         while items.count > maxItems || payloadBytes > maxPayloadBytes {
-            guard let index = items.lastIndex(where: { !$0.isPinned }) else { break }
+            guard let index = items.lastIndex(where: { !$0.isPinned && $0.id != protected })
+            else { break }
             payloadBytes -= items[index].payloadByteCount
             items.remove(at: index)
         }

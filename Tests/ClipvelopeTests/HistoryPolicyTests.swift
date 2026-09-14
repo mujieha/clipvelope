@@ -68,6 +68,36 @@ final class HistoryPolicyTests: XCTestCase {
         XCTAssertEqual(HistoryPolicy.trimmed(items, maxItems: 1), items)
     }
 
+    /// The entry that has just been inserted is never the one evicted, however
+    /// full the list is and however much of it is pinned. Without this, a list of
+    /// nothing but pinned rows at the cap makes the new entry the only candidate
+    /// the loop can see, so it goes straight back out and the caller is handed
+    /// the list it passed in -- which is how a copy came to be dropped silently.
+    func testTheEntryJustInsertedIsNeverTheOneEvicted() {
+        let full = (0..<3).map { item("pinned \($0)", pinned: true) }
+        let result = HistoryPolicy.inserting("just copied", into: full, maxItems: 3)
+        XCTAssertEqual(result.first?.searchText, "just copied")
+        XCTAssertEqual(result.count, 4, "one row above the cap, and no further")
+
+        // The next copy protects itself instead, which makes its predecessor an
+        // ordinary candidate again: the list cannot climb.
+        let next = HistoryPolicy.inserting("copied next", into: result, maxItems: 3)
+        XCTAssertEqual(next.first?.searchText, "copied next")
+        XCTAssertEqual(next.count, 4)
+        XCTAssertFalse(next.contains { $0.searchText == "just copied" })
+    }
+
+    /// The byte budget cannot starve it either.
+    func testTheEntryJustInsertedSurvivesTheByteBudget() {
+        let heavy = [image(1_000, pinned: true), image(1_000, pinned: true)]
+        let result = HistoryPolicy.inserting(.image(.init(pixelWidth: 1, pixelHeight: 1,
+                                                          byteCount: 10,
+                                                          typeIdentifier: "public.png")),
+                                             into: heavy, maxItems: 200, maxPayloadBytes: 100)
+        XCTAssertEqual(result.count, 3)
+        XCTAssertEqual(result.first?.payloadByteCount, 10)
+    }
+
     func testInsertingRespectsCapacityAndPins() {
         let items = [item("x"), item("keep", pinned: true)]
         let result = HistoryPolicy.inserting("new", into: items, maxItems: 2)

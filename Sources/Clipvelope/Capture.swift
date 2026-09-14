@@ -232,7 +232,13 @@ final class ClipboardMonitor {
         // order of magnitude larger for the same picture.
         let raw: Data
         let isPNG: Bool
-        if let png = pb.data(forType: .png) {
+        // The signature, not the type, decides. Any process can register bytes
+        // of its choosing under `public.png`, and taking that word for it stored
+        // them verbatim as an item labelled `public.png` -- which import,
+        // `copyToPasteboard` and `thumbnail` all then refuse, so the entry
+        // deletes itself later saying its file was missing. Bytes that are not a
+        // PNG fall through to the TIFF branch, which re-encodes a real one.
+        if let png = pb.data(forType: .png), png.starts(with: pngSignature) {
             (raw, isPNG) = (png, true)
         } else if let tiff = pb.data(forType: .tiff) {
             (raw, isPNG) = (tiff, false)

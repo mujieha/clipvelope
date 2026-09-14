@@ -61,10 +61,15 @@ final class ClipboardStore: ObservableObject {
     /// Only for the auto-backup password. The encryption key comes from
     /// `storage.keyStore`, so the vault and its backups cannot diverge.
     private let autoBackupPasswordStore = KeychainKeyStore()
-    private let maxItems = 200
+    /// How many entries the live history holds, pins aside.
+    static let maxItems = 200
     /// A ceiling on what one untrusted backup may install, well above any vault
     /// this app produces and far below a file built to fill a disk.
     static let maxImportedItems = 1_000
+    /// And a ceiling on how many of those may stay pinned, because a pinned
+    /// entry is exempt from the live cap: one below it, so a copy made after the
+    /// import still fits underneath. See `disarming` for the whole argument.
+    static var maxImportedPinnedItems: Int { maxItems - 1 }
     /// And a ceiling on the total inline text it may install, because every byte
     /// of it is re-encrypted on every copy for as long as it stays in the vault.
     static let maxImportedInlineBytes = 32 * 1024 * 1024
@@ -75,6 +80,8 @@ final class ClipboardStore: ObservableObject {
 
     private var autoBackupWork: DispatchWorkItem?
     private var noticeWork: DispatchWorkItem?
+    /// Kept so the observer can be taken down again; see `flushPendingWork`.
+    private var terminationObserver: NSObjectProtocol?
     private var thumbnailCache: [UUID: NSImage] = [:]
 
     private var autoBackupURL: URL {
@@ -123,8 +130,24 @@ final class ClipboardStore: ObservableObject {
             }
             unavailableSlots = GlobalHotkeyCenter.shared.register()
             registerOpenHotkey()
+            // Observed here rather than in an application delegate, because the
+            // thing that has to be flushed is this object's queue and an
+            // `NSApplicationDelegateAdaptor` is built before the store exists,
+            // with no way to reach it. The Quit button calls
+            // `NSApplication.terminate`, which posts this and then exits.
+            terminationObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                self?.flushPendingWork()
+            }
         }
         loadFromStorage()
+    }
+
+    deinit {
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(terminationObserver)
+        }
     }
 
     // MARK: Notices
@@ -232,6 +255,43 @@ final class ClipboardStore: ObservableObject {
     /// Blocks until queued vault I/O has drained. Test support.
     func drainPendingWork() {
         ioQueue.sync {}
+    }
+
+    /// The longest quitting may wait for the vault to finish being written.
+    ///
+    /// Long enough for an index save and a payload write, which are milliseconds
+    /// each, plus room for an auto-backup that happened to be in flight; short
+    /// enough that a queue wedged on a Keychain prompt cannot turn Quit into a
+    /// hang. Missing the deadline costs the last copy, which is what this exists
+    /// to prevent -- but a Quit button that does nothing is worse, and the
+    /// timeout is the only thing that rules it out.
+    static let quitFlushTimeout: TimeInterval = 3
+
+    /// Waits, briefly, for queued vault writes to reach the disk.
+    ///
+    /// `add` enqueues the payload and `persist` enqueues the index onto a
+    /// `.utility` queue that can be seconds behind under load, and
+    /// `NSApplication.terminate` does not wait for either: copy something, quit
+    /// from the footer, and the index write died with the process while the
+    /// strip had already said the vault held it. Nothing in the app called this
+    /// before.
+    ///
+    /// Returns false if the deadline passed with work still queued, which is
+    /// logged rather than shown: by then the app is a moment from exiting and
+    /// there is no surface left to show anything on.
+    @discardableResult
+    func flushPendingWork(timeout: TimeInterval = ClipboardStore.quitFlushTimeout) -> Bool {
+        let drained = DispatchSemaphore(value: 0)
+        // The queue is serial, so a block enqueued now runs behind everything
+        // already on it. `.userInitiated` promotes what is waiting in front of
+        // it: the user asked for this and is watching the app fail to quit.
+        ioQueue.async(qos: .userInitiated) { drained.signal() }
+        guard drained.wait(timeout: .now() + timeout) == .success else {
+            NSLog("%@", "Clipvelope: vault writes had not finished \(timeout)s after quitting "
+                  + "was requested; exiting without them.")
+            return false
+        }
+        return true
     }
 
     private func loadFromStorage() {
@@ -448,10 +508,18 @@ final class ClipboardStore: ObservableObject {
             content = .files(urls.map { .init(path: $0.path) })
         }
 
-        let updated = HistoryPolicy.inserting(content, into: items, maxItems: maxItems,
+        let updated = HistoryPolicy.inserting(content, into: items, maxItems: Self.maxItems,
                                               maxPayloadBytes: maxPayloadBytes,
                                               id: id, source: source)
-        guard updated != items else { return }
+        // Unreachable now that `inserting` protects the entry it adds, and left
+        // here as the tripwire for it ever becoming reachable again: this
+        // returning quietly is exactly how a vault saturated with pinned rows
+        // swallowed every copy the user made without a word.
+        guard updated != items else {
+            NSLog("%@", "Clipvelope: a copy was not recorded -- the history policy returned "
+                  + "the list unchanged for a new entry. This should not happen.")
+            return
+        }
 
         // Write the payload before the index that names it. ioQueue is serial and
         // persist() enqueues onto it, so this ordering holds.
@@ -494,7 +562,7 @@ final class ClipboardStore: ObservableObject {
         var updated = items
         updated[index].isPinned.toggle()
         // Unpinning can put the list back over either cap.
-        replaceItems(with: HistoryPolicy.trimmed(updated, maxItems: maxItems,
+        replaceItems(with: HistoryPolicy.trimmed(updated, maxItems: Self.maxItems,
                                                  maxPayloadBytes: maxPayloadBytes))
     }
 
@@ -1045,6 +1113,35 @@ final class ClipboardStore: ObservableObject {
                          + "left out: they point at files on the machine that wrote the backup.")
         }
 
+        // Last, so the rows already left out do not spend a pin.
+        //
+        // A pinned row is exempt from the history cap, so how many of them a file
+        // may install is not a matter of taste: at `maxItems` pinned rows the
+        // vault sits at its ceiling with nothing the cap is allowed to evict, and
+        // `HistoryPolicy`'s protection of the newest entry is then the only thing
+        // between the user and a copy that goes nowhere. `maxItems - 1` is the
+        // largest count that leaves the ordinary rule working unaided -- one copy
+        // still fits under the cap without displacing anything -- so that is the
+        // number, reached by arithmetic rather than by picking a round one.
+        //
+        // The surplus is imported *unpinned* rather than dropped. A restore that
+        // silently deletes entries is the failure this file is full of fixes for;
+        // unpinning keeps every entry the backup carried and merely returns them
+        // to the cap that governs everything else, which is where a
+        // thousand-entry import has always left them.
+        let pinnable = Self.maxImportedPinnedItems
+        let pinned = state.items.indices.filter { state.items[$0].isPinned }
+        if pinned.count > pinnable {
+            for index in pinned.dropFirst(pinnable) {
+                state.items[index].isPinned = false
+            }
+            let unpinned = pinned.count - pinnable
+            notes.append("\(unpinned) entr\(unpinned == 1 ? "y was" : "ies were") pinned beyond "
+                         + "the \(pinnable) a backup may pin, so \(unpinned == 1 ? "it was" : "they were") "
+                         + "imported unpinned. Pinned entries are never trimmed, and a history "
+                         + "made of nothing else has no room for what you copy next.")
+        }
+
         return (state, notes)
     }
 
@@ -1058,10 +1155,22 @@ final class ClipboardStore: ObservableObject {
     /// the payload is refused and the caller tells the user which entries went.
     /// A backup written before the field existed declares no hash and is judged
     /// exactly as it was before.
+    ///
+    /// The declared `byteCount` is part of the claim too, and unlike the hash it
+    /// is never absent -- every version of this app has written it, straight from
+    /// the length of the bytes it stored. It is only clamped on decode, so
+    /// nothing else stopped a backup filing a real 32 MB picture under an item
+    /// declaring `byteCount: 0`, and three separate things downstream believe
+    /// that number: `hasPayloadFile`, which decides whether the payload is
+    /// carried in the backups the user makes from then on; the byte budget in
+    /// `HistoryPolicy.trimmed`, which cannot evict weight it cannot see; and
+    /// `replaceItems`, which leaves the file on disk when the row goes. A claim
+    /// that does not match its bytes is refused here like any other.
     static func payloadIsAcceptable(_ data: Data, for content: ClipboardContent) -> Bool {
         switch content {
         case .image(let info):
             guard data.count <= ClipboardMonitor.maxImageBytes,
+                  info.byteCount == data.count,
                   data.starts(with: ClipboardMonitor.pngSignature),
                   let size = ClipboardMonitor.declaredPixelSize(of: data),
                   ClipboardMonitor.acceptsImage(pixelWidth: size.0, pixelHeight: size.1),
@@ -1070,6 +1179,7 @@ final class ClipboardStore: ObservableObject {
             return true
         case .richText(let info):
             return data.count <= ClipboardMonitor.maxRichTextBytes
+                && info.byteCount == data.count
                 && hashMatches(data, declared: info.contentHash)
         case .text, .files:
             // Neither keeps a payload file, so a payload claiming to be one is
@@ -1139,9 +1249,20 @@ final class ClipboardStore: ObservableObject {
             // before decoding it precisely so a small file cannot demand an
             // enormous raster; a backup is the same hostile input and gets the
             // same check, against what its own item claims to be.
+            //
+            // Judged here and written further down, after the main queue has had
+            // its say. They used to be written on the spot, which put them in
+            // `items/` moments before an import into a suspended vault moved
+            // `items/` aside: `quarantineUnreadableVault` takes the payload
+            // directory with the index, deliberately and correctly, so the
+            // pictures the import had just restored went into
+            // `items.unreadable-<stamp>` and the rows installed a breath later
+            // pointed at nothing. That is the recovery path failing at the one
+            // moment it is needed.
             let declared = Dictionary(snapshot.state.items.map { ($0.id, $0.content) },
                                       uniquingKeysWith: { first, _ in first })
             var rejected: Set<UUID> = []
+            var accepted: [UUID: Data] = [:]
             for (key, data) in snapshot.payloads {
                 guard let id = UUID(uuidString: key) else { continue }
                 guard let content = declared[id],
@@ -1149,7 +1270,7 @@ final class ClipboardStore: ObservableObject {
                     rejected.insert(id)
                     continue
                 }
-                try? storage.writePayload(data, for: id)
+                accepted[id] = data
             }
 
             let imported = snapshot.state
@@ -1179,6 +1300,27 @@ final class ClipboardStore: ObservableObject {
                     // the right key is back. A successful import replaces the vault,
                     // but it must not write over that file.
                     self.storage.quarantineUnreadableVault()
+                }
+                // Only now, with whatever was there already moved aside, and on
+                // the queue that owns the vault. `ioQueue` is serial and the
+                // `persist()` below enqueues the index behind these, so the
+                // payloads are on disk before anything names them -- the same
+                // ordering `add` keeps.
+                //
+                // Only the payloads of rows that actually reached the vault: an
+                // entry `disarming` left out has no row to be read through, so
+                // its bytes would sit in `items/` until some later launch swept
+                // them.
+                let live = Set(state.items.map(\.id))
+                let payloads = accepted.filter { live.contains($0.key) }
+                self.ioQueue.async {
+                    for (id, data) in payloads {
+                        do {
+                            try self.storage.writePayload(data, for: id)
+                        } catch {
+                            NSLog("%@", "Clipvelope: could not write imported payload for \(id): \(error)")
+                        }
+                    }
                 }
                 self.apply(state)
                 // A successful import is authoritative: it clears a suspended vault.

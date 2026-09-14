@@ -57,6 +57,23 @@ update prompt; `make appcast` takes it from here.
 - Every message about a paste that did not happen, and every Quick Slot
   failure, was written into the history panel — which is closed at exactly
   those moments, so no one ever saw one. They now reach you where you are.
+- A history made entirely of pinned entries stopped Clipvelope recording
+  anything at all, silently: nothing could be trimmed to make room, so each new
+  copy was thrown away the moment it arrived. Importing a backup was enough to
+  arrange it. Whatever the history holds, what you copy next is now kept, and a
+  backup may leave at most 199 of its entries pinned. A vault already in that
+  state starts recording again as soon as you open it.
+- Importing a backup while your vault could not be read — the situation the
+  import is there to rescue — put the restored pictures and formatted entries
+  aside along with the old vault, so they all came back broken. They are now
+  written after the old vault is set aside, and the old one is still kept.
+- A backup could understate how large an entry's picture was, which quietly
+  left that picture out of every backup you made afterwards. The stored bytes
+  are now checked against what the entry claims about them.
+- Bytes another app offered as a PNG are no longer stored as one without
+  checking. They could not be read back, so the entry deleted itself later,
+  saying its file was missing.
+- Quitting waits, briefly, for the last thing you copied to reach the vault.
 
 ## 0.1.0
 

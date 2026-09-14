@@ -119,6 +119,32 @@ final class CaptureReadingTests: XCTestCase {
         XCTAssertEqual([w, h], [300, 200])
     }
 
+    /// Any process can register bytes of its choosing under `public.png`.
+    /// Capture used to take that at its word and store them verbatim as an item
+    /// labelled `public.png` -- the one place in the app that stored a payload as
+    /// a PNG without looking at the signature, where import, `copyToPasteboard`
+    /// and `thumbnail` all check it. The entry then deleted itself on the first
+    /// click, saying its file was missing, which it was not.
+    func testBytesThatAreNotAPNGAreNotCapturedAsOne() {
+        pb.setData(Data("GIF89a and then whatever ImageIO makes of the rest".utf8), forType: .png)
+        XCTAssertNil(ClipboardMonitor.readPayload(from: pb),
+                     "nothing under public.png is a picture just because it says so")
+    }
+
+    /// And when a real image is on the pasteboard under another type, the
+    /// signature check does not lose it: the TIFF branch re-encodes a PNG the
+    /// app can actually read back.
+    func testAnImageOfferedAsTIFFUnderALyingPNGIsStillCaptured() {
+        pb.setData(Data("not a png at all".utf8), forType: .png)
+        pb.setData(NSBitmapImageRep(data: pngData(width: 5, height: 4))!
+            .representation(using: .tiff, properties: [:])!, forType: .tiff)
+        guard case .image(let data, let type, let w, let h)? = ClipboardMonitor.readPayload(from: pb)
+        else { return XCTFail() }
+        XCTAssertEqual([w, h], [5, 4])
+        XCTAssertEqual(type, "public.png")
+        XCTAssertTrue(data.starts(with: ClipboardMonitor.pngSignature))
+    }
+
     func testTheImageCeilingAdmitsScreensAndRefusesTheAbsurd() {
         XCTAssertTrue(ClipboardMonitor.acceptsImage(pixelWidth: 6016, pixelHeight: 3384), "a 6K display")
         XCTAssertFalse(ClipboardMonitor.acceptsImage(pixelWidth: 50_000, pixelHeight: 50_000))
