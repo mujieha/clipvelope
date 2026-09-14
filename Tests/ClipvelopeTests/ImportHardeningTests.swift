@@ -448,10 +448,21 @@ final class ImportHardeningTests: XCTestCase {
 
     // MARK: - Duplicate ids
 
-    /// The panel indexes rows by id with an initializer that traps on a
-    /// duplicate. A backup is a file, and a file can say anything.
-    func testABackupWithDuplicateItemIDsImportsWithoutDuplicates() throws {
+    /// Two entries under one id are refused outright, and the whole file with
+    /// them.
+    ///
+    /// Deduplicating and importing the rest was the old answer, and it was not
+    /// enough: an id is what a payload is filed under, so while two items claim
+    /// one the question "which item do these bytes belong to" has two answers,
+    /// and the import asks it in two places that need not agree. Refusing is one
+    /// rule to be sure of instead of an ordering to keep true forever, and it
+    /// costs nothing legitimate -- a vault is deduplicated before it is saved,
+    /// so no backup this app writes has duplicate ids.
+    func testABackupWithDuplicateItemIDsIsRefusedEntirely() throws {
         let store = makeStore()
+        store.add(text: "what was already here")
+        settle(store)
+
         let id = UUID()
         var state = AppState.empty
         state.items = [
@@ -465,8 +476,52 @@ final class ImportHardeningTests: XCTestCase {
         store.importBackup(from: url, password: nil)
         settle(store)
 
-        XCTAssertEqual(store.items.map(\.searchText), ["first", "third"])
-        XCTAssertEqual(Set(store.items.map(\.id)).count, store.items.count)
+        XCTAssertNotNil(store.backupFailure,
+                        "a refusal the user is not told about is indistinguishable from a crash")
+        XCTAssertEqual(store.items.map(\.searchText), ["what was already here"],
+                       "not one entry from the file reached the vault")
+    }
+
+    /// The reason the rule above is worth a whole file: the two "firsts" really
+    /// do come apart.
+    ///
+    /// The payload check keeps the first item with a given id, and here that is
+    /// a rich-text item, whose payloads are judged on nothing but a size
+    /// ceiling. `disarming` then drops that item for being oversized and `apply`
+    /// keeps the first survivor, which is the image -- leaving an image row
+    /// whose bytes never faced the PNG signature, the declared pixel size or
+    /// `acceptsImage`, and which `thumbnail(for:)` would have handed to ImageIO.
+    func testABackupCannotSmuggleAnUncheckedPayloadInAsAnImage() throws {
+        let store = makeStore()
+        let id = UUID()
+        let notAPNG = Data("GIF89a and then whatever ImageIO makes of the rest".utf8)
+        var state = AppState.empty
+        state.items = [
+            ClipboardItem(id: id, createdAt: Date(), isPinned: false,
+                          content: .richText(.init(
+                              plainText: String(repeating: "x", count: ClipboardMonitor.maxTextBytes + 1),
+                              byteCount: notAPNG.count, typeIdentifier: "public.rtf")),
+                          sourceBundleID: nil),
+            ClipboardItem(id: id, createdAt: Date(), isPinned: false,
+                          content: .image(.init(pixelWidth: 2, pixelHeight: 2,
+                                                byteCount: notAPNG.count,
+                                                typeIdentifier: "public.png")),
+                          sourceBundleID: nil),
+        ]
+        let url = root.appendingPathComponent("smuggled-image.cvb")
+        try writeBackup(state, to: url, password: "pw", payloads: [id.uuidString: notAPNG])
+
+        store.importBackup(from: url, password: "pw")
+        settle(store)
+
+        XCTAssertNotNil(store.backupFailure)
+        XCTAssertTrue(store.items.isEmpty, "nothing from the file reached the vault")
+
+        // Refused before anything was written, rather than cleaned up after.
+        let vault = EncryptedStorage(directory: root.appendingPathComponent("vault"),
+                                     keyStore: FixedKeyStore(seed: 1))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: vault.payloadURL(for: id).path),
+                       "no payload file may be written for a snapshot that is refused")
     }
 
     func testRemovingDuplicateIDsKeepsTheFirstOccurrence() {

@@ -560,6 +560,17 @@ final class ClipboardStore: ObservableObject {
     /// The paste itself is hung off the copy's completion, so it can never
     /// arrive while the clipboard still holds the previous entry.
     ///
+    /// That completion is the reason the deadline is stamped *here*, before the
+    /// copy rather than inside `PasteService`. For a text entry the completion
+    /// is synchronous and the paste follows the keystroke at once; for an image
+    /// or a formatted entry it waits on `ioQueue`, which is serial and also
+    /// carries index saves, payload writes, `storage.clear()` and an auto-backup
+    /// that may serialise every payload in the vault. So the gap being bounded
+    /// is the one between the user pressing Return and the keystroke going out,
+    /// and only a clock started at the keystroke measures it. `PasteService`
+    /// cannot start that clock: by the time it is called the gap has already
+    /// happened.
+    ///
     /// Closing the panel is `keyWindow.close()`, the same call the view makes,
     /// and the wait for focus to come back lives in `PasteService`.
     ///
@@ -570,21 +581,23 @@ final class ClipboardStore: ObservableObject {
         guard systemIntegrationEnabled else { return copy(nil) }
         NSApplication.shared.keyWindow?.close()
         guard pasteDirectly else { return copy(nil) }
+        let postBy = Date().addingTimeInterval(PasteService.postWindow)
         copy({ [weak self] in
-            PasteService.pasteWhenFocusReturns { outcome in
+            PasteService.pasteWhenFocusReturns(postBy: postBy) { outcome in
                 self?.report(outcome)
             }
         })
     }
 
-    /// Three outcomes, three answers.
+    /// Four outcomes, four answers.
     ///
     /// A paste that worked says nothing, because the text appearing where the
-    /// user was typing is the message. The other two are situations they cannot
-    /// otherwise tell apart -- and the remedy differs: one needs a permission
-    /// granted, the others only need Command + V pressed by hand. Every message
-    /// says the entry *was* copied, because in all three cases it was, and a
-    /// user who thinks the copy failed too would go back and choose it again.
+    /// user was typing is the message. The other three are situations they
+    /// cannot otherwise tell apart -- and the remedy differs: one needs a
+    /// permission granted, the rest only need Command + V pressed by hand. Every
+    /// message says the entry *was* copied, because in all four cases it was,
+    /// and a user who thinks the copy failed too would go back and choose it
+    /// again.
     private func report(_ outcome: PasteService.Outcome) {
         switch outcome {
         case .pasted:
@@ -598,6 +611,10 @@ final class ClipboardStore: ObservableObject {
         case .failed(.focusDidNotReturn):
             showNotice("The entry was copied, but the window you were in did not take focus "
                        + "back, so nothing was pasted. Press Command + V to paste it.")
+        case .failed(.tookTooLong):
+            showNotice("The entry was copied, but it took long enough that pasting it might "
+                       + "have put it somewhere you had moved on to, so nothing was pasted. "
+                       + "Press Command + V to paste it where you want it.")
         }
     }
 
@@ -609,8 +626,14 @@ final class ClipboardStore: ObservableObject {
         guard case .image = item.content else { return completion(nil) }
 
         ioQueue.async { [weak self] in
+            // The same signature check `copyToPasteboard` makes, for the same
+            // reason and one line of it: `NSImage(data:)` hands the bytes to
+            // ImageIO, which will parse a great many formats, so an image row
+            // whose payload is not a PNG must not be decoded here either. It
+            // closes the class of problem rather than any one route to it.
             guard let self,
                   let data = try? storage.readPayload(for: item.id),
+                  data.starts(with: ClipboardMonitor.pngSignature),
                   let image = NSImage(data: data) else {
                 DispatchQueue.main.async { completion(nil) }
                 return
@@ -1022,6 +1045,32 @@ final class ClipboardStore: ObservableObject {
             }
             let trust: BackupTrust = password == nil ? .deviceBound : .portable
             let snapshot = try Self.decodeSnapshot(decrypted)
+
+            // Two entries under one id make "the item claiming this id"
+            // ambiguous, and the two places that resolve it need not resolve it
+            // the same way: the payload check below keeps the first item with
+            // that id, while `disarming` afterwards drops items independently --
+            // for being oversized -- and `apply` keeps the first *survivor*. A
+            // file pairing an oversized rich-text item with an image under one
+            // id therefore has its payload judged against the rich-text claim,
+            // which only looks at a size ceiling, and the image is the one that
+            // reaches the vault: an image row whose bytes never faced the PNG
+            // signature, the declared pixel size, or `acceptsImage`.
+            //
+            // Refusing the whole file is the answer rather than re-checking
+            // after the filtering, because it is one rule to be sure of instead
+            // of an ordering to keep true forever. Nothing legitimate is lost: a
+            // vault is deduplicated before it is saved, so no backup this app
+            // has ever written has two items under one id.
+            let ids = snapshot.state.items.map(\.id)
+            guard Set(ids).count == ids.count else {
+                DispatchQueue.main.async {
+                    self.backupFailure = "That backup lists two entries under one identifier, "
+                        + "which no backup Clipvelope writes does, so none of it was imported. "
+                        + "Export a fresh backup from a vault you can still open."
+                }
+                return
+            }
 
             // Payload bytes come out of the file, and an image payload is decoded
             // later to draw a thumbnail. Capture checks a picture's declared size

@@ -7,9 +7,16 @@ test:
 	./scripts/test.sh
 
 # Everything CI checks that does not need a build.
+#
+# The appcast self-test belongs here rather than in `make appcast`: it proves the
+# URL rule and the rewrite against a synthetic feed, so it needs no signing key,
+# no Sparkle build and no disk image -- and the update channel is the one place
+# where a mistake reaches every installed copy. Without this the rule was only
+# ever exercised by hand.
 check:
 	./scripts/check-workflows.sh
 	plutil -lint Resources/Info.plist Resources/Clipvelope.entitlements
+	CLIPVELOPE_APPCAST_SELFTEST=1 ./scripts/make-appcast.sh
 
 # Read-only. Refuses a release whose version, changelog, build number or dist/
 # contents are wrong. Run it before `make release`.

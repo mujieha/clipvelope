@@ -24,11 +24,10 @@ import ApplicationServices
 enum PasteService {
     /// What an attempt to paste actually did.
     ///
-    /// Three situations, not two, because the remedies are three different
-    /// things: grant a permission, try again, or press Command + V yourself. A
-    /// `Bool` here would collapse "you have not allowed this yet" into "it did
-    /// not work", and the user would have no way to tell which they were
-    /// looking at.
+    /// Several situations, not two, because the remedies differ: grant a
+    /// permission, try again, or press Command + V yourself. A `Bool` here would
+    /// collapse "you have not allowed this yet" into "it did not work", and the
+    /// user would have no way to tell which they were looking at.
     enum Outcome: Equatable {
         /// Command + V was posted. Whether the app underneath honoured it is
         /// that app's business and cannot be observed from here.
@@ -37,7 +36,7 @@ enum PasteService {
         case notTrusted
         case failed(Reason)
 
-        /// Why a trusted paste still did not happen. Two genuinely different
+        /// Why a trusted paste still did not happen. Three genuinely different
         /// faults that must not be reported with one message.
         enum Reason: Equatable {
             /// CoreGraphics would not hand over an event to post.
@@ -46,6 +45,12 @@ enum PasteService {
             /// Posting anyway would have typed Command + V into the panel the
             /// user just closed rather than into their document.
             case focusDidNotReturn
+            /// Too long passed between the user choosing the entry and the
+            /// keystroke being ready to go out. Not the same fault as the one
+            /// above: there the panel would not let go, here the user has had
+            /// time to move somewhere else, and posting would type the entry
+            /// into whatever they moved to.
+            case tookTooLong
         }
     }
 
@@ -57,6 +62,25 @@ enum PasteService {
     /// is not slowness but something actually wrong, and a paste half a second
     /// late would land in whatever the user has started doing since.
     static let focusTimeout: TimeInterval = 0.5
+
+    /// How long after the user chose an entry the keystroke may still go out.
+    ///
+    /// `focusTimeout` bounds only the wait for the panel to let go. It does not
+    /// bound the gap between the user pressing Return and this code being asked
+    /// to post, because the copy happens in between and an image or a formatted
+    /// entry reads its payload on a serial queue shared with index saves, vault
+    /// clears, and a backup that may serialise every payload in the vault. With
+    /// that queue busy the copy can complete seconds late, and by then the
+    /// frontmost application is whatever the user turned to in the meantime --
+    /// so posting would type a history entry, which this app's own premise says
+    /// may be a password, into an application they never chose.
+    ///
+    /// Two seconds: comfortably longer than `focusTimeout` plus an ordinary
+    /// payload read, comfortably shorter than the point at which someone has
+    /// moved on. Past it the entry is still on the clipboard and the user is
+    /// told to press Command + V themselves, which puts the choice of where it
+    /// lands back with them.
+    static let postWindow: TimeInterval = 2
 
     /// How long to wait *after* the panel has given up the keyboard, before
     /// posting.
@@ -162,26 +186,60 @@ enum PasteService {
     /// `focusTimeout` is a ceiling, not a schedule: in the ordinary case the
     /// first check already passes and only `settleDelay` is spent.
     ///
+    /// `postBy` is the moment after which this must not post at all. It is a
+    /// `Date` rather than a duration so that the caller can stamp it when the
+    /// *user* acted, which is earlier than this call and is the only clock that
+    /// answers "has the user moved on since". `ClipboardStore` stamps it before
+    /// the copy it hangs this off.
+    ///
     /// `completion` runs on the main queue.
-    static func pasteWhenFocusReturns(timeout: TimeInterval = focusTimeout,
+    static func pasteWhenFocusReturns(postBy postDeadline: Date
+                                        = Date().addingTimeInterval(postWindow),
+                                      timeout: TimeInterval = focusTimeout,
                                       completion: @escaping (Outcome) -> Void) {
         // Checked before the wait as well as inside `paste()`, so an ungranted
-        // permission is reported at once instead of after half a second of
-        // watching for a focus change that would not have helped.
-        guard isTrusted else { return completion(.notTrusted) }
-        waitForFocus(deadline: Date().addingTimeInterval(timeout), completion: completion)
+        // permission -- or a deadline already gone -- is reported at once
+        // instead of after half a second of watching for a focus change that
+        // would not have helped.
+        if let refusal = refusal(trusted: isTrusted, now: Date(), postBy: postDeadline) {
+            return completion(refusal)
+        }
+        waitForFocus(until: Date().addingTimeInterval(timeout),
+                     postBy: postDeadline, completion: completion)
     }
 
-    private static func waitForFocus(deadline: Date, completion: @escaping (Outcome) -> Void) {
+    /// Everything that has to be true for a keystroke to go out, in one place
+    /// and with no clock, window server or event of its own: `nil` to post, or
+    /// the outcome to report instead.
+    ///
+    /// Pure on purpose. `paste()` synthesises a real Command + V into whatever
+    /// the machine is doing, so a test may not call it -- and the deadline is
+    /// exactly the part that most needs testing. Keeping the decision here means
+    /// the production path has one gate rather than two scattered checks, and
+    /// the test drives the same code the app does.
+    static func refusal(trusted: Bool, now: Date, postBy postDeadline: Date) -> Outcome? {
+        guard trusted else { return .notTrusted }
+        guard now < postDeadline else { return .failed(.tookTooLong) }
+        return nil
+    }
+
+    private static func waitForFocus(until focusDeadline: Date, postBy postDeadline: Date,
+                                     completion: @escaping (Outcome) -> Void) {
         guard stillHasFocus else {
             DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) {
+                // Asked again here, not only on the way in: the focus wait and
+                // the settle delay are themselves time, and this is the last
+                // instant before the keystroke becomes irretrievable.
+                if let refusal = refusal(trusted: isTrusted, now: Date(), postBy: postDeadline) {
+                    return completion(refusal)
+                }
                 completion(paste())
             }
             return
         }
-        guard Date() < deadline else { return completion(.failed(.focusDidNotReturn)) }
+        guard Date() < focusDeadline else { return completion(.failed(.focusDidNotReturn)) }
         DispatchQueue.main.asyncAfter(deadline: .now() + pollInterval) {
-            waitForFocus(deadline: deadline, completion: completion)
+            waitForFocus(until: focusDeadline, postBy: postDeadline, completion: completion)
         }
     }
 

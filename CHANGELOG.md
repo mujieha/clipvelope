@@ -36,8 +36,9 @@ update prompt; `make appcast` takes it from here.
   type were treated as the same entry: the second one was dropped and the
   older picture shown under a new timestamp. They are now told apart by their
   contents. Formatted text had the same flaw.
-- Only one copy of Clipvelope can run at a time. Two of them fought over the
-  global shortcuts, and Preferences then blamed another app for taking them.
+- Opening Clipvelope while it is already running no longer starts a second
+  copy. Two of them fought over the global shortcuts, and Preferences then
+  blamed another app for taking them.
 - Control + Option + V no longer depends on an internal name inside macOS that
   a system update could change, which would have left the app looking broken
   with no way in.

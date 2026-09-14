@@ -84,7 +84,8 @@ aimed precisely at the people who have not updated yet, and one Sparkle reports
 as nothing more than a failed check. So `make appcast` rewrites each
 `<enclosure url=…>` from that file's own name after the tool has run. The
 signature beside it covers the disk image's bytes rather than the feed's, so
-rewriting the URL leaves it valid; the script checks that it stayed untouched.
+rewriting the URL leaves it valid; the self-test below checks that it stayed
+untouched, and `make check` runs it, so every CI run checks it too.
 
 `CLIPVELOPE_DOWNLOAD_PREFIX` still overrides everything, unchanged, for
 downloads hosted somewhere other than GitHub releases — there the operator has
@@ -98,7 +99,8 @@ CLIPVELOPE_APPCAST_SELFTEST=1 ./scripts/make-appcast.sh
 
 It prints the URL two made-up releases would get, then rewrites a feed shaped
 like the real one and checks each item came back under its own tag with its
-signature intact.
+signature intact. `make check` runs exactly this, so it needs no build, no
+signing key and no disk image, and CI runs the same script on every push.
 
 ## Why the updater is opt-in at build time
 

@@ -466,6 +466,51 @@ final class StoreIntegrationTests: XCTestCase {
         XCTAssertEqual(seenPlain, "styled")
     }
 
+    /// The copy a paste hangs off can be slow -- an image or a formatted entry
+    /// reads its payload on a serial queue that also carries index saves and a
+    /// backup of the whole vault -- and by the time it finishes the user may be
+    /// somewhere else entirely. Posting then would type a history entry, which
+    /// may be a password, into an application they never chose. So the keystroke
+    /// is refused once the window that started when they pressed Return has run
+    /// out, and refused with its own reason rather than as a focus failure,
+    /// because the two say different things about what went wrong.
+    ///
+    /// Tested through `refusal`, never through `paste()`: that one posts a real
+    /// Command + V into whatever this machine happens to be doing.
+    func testAPasteIsRefusedOnceTheUserCanHaveMovedOn() {
+        let chosen = Date()
+        let postBy = chosen.addingTimeInterval(PasteService.postWindow)
+
+        XCTAssertNil(PasteService.refusal(trusted: true, now: chosen, postBy: postBy),
+                     "the ordinary case: the user has only just pressed Return")
+        XCTAssertNil(PasteService.refusal(trusted: true,
+                                          now: chosen.addingTimeInterval(PasteService.focusTimeout),
+                                          postBy: postBy),
+                     "a full focus wait must still leave room to post")
+        XCTAssertEqual(PasteService.refusal(trusted: true,
+                                            now: postBy.addingTimeInterval(0.001),
+                                            postBy: postBy),
+                       .failed(.tookTooLong))
+        XCTAssertEqual(PasteService.refusal(trusted: true,
+                                            now: chosen.addingTimeInterval(30),
+                                            postBy: postBy),
+                       .failed(.tookTooLong),
+                       "a copy held up for half a minute must never reach the keyboard")
+
+        XCTAssertNotEqual(PasteService.Outcome.failed(.tookTooLong), .failed(.focusDidNotReturn),
+                          "two different situations must not be reported identically")
+
+        // A permission that was never granted is the more useful thing to say:
+        // no deadline would have made that paste happen.
+        XCTAssertEqual(PasteService.refusal(trusted: false,
+                                            now: chosen.addingTimeInterval(30),
+                                            postBy: postBy),
+                       .notTrusted)
+
+        XCTAssertGreaterThan(PasteService.postWindow, PasteService.focusTimeout,
+                             "the window has to outlast the wait it contains")
+    }
+
     func testIgnoredAppsPersistAndDeduplicate() {
         let store = makeStore()
         store.ignoreApp(bundleID: "com.1password.1password")
