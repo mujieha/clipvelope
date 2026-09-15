@@ -102,6 +102,29 @@ like the real one and checks each item came back under its own tag with its
 signature intact. `make check` runs exactly this, so it needs no build, no
 signing key and no disk image, and CI runs the same script on every push.
 
+## Which macOS the checks actually run on
+
+`LSMinimumSystemVersion` is 26.0, so the app runs on macOS 26 and everything
+after it. Both ends need testing, and they are not interchangeable: 0.2.0
+development produced a commit that passed every check on macOS 26 and, on macOS
+27, opened nothing at all — SwiftUI's `MenuBarExtra` stopped wiring its status
+item's target and action there, so the keyboard shortcut and `--open`, the only
+two ways into the app, became silent no-ops. No headless test can see that. Only
+launching the app on that OS can, which is what `make smoke` does.
+
+- **macOS 26** is covered by `.github/workflows/ci.yml` on GitHub's hosted
+  runners, on every push and every pull request. The matrix there has a
+  `macos-27` entry written out and commented, ready for the day that image
+  exists; hosted runners currently stop at 26.
+- **macOS 27** is covered by `.github/workflows/ci-macos27.yml` on a self-hosted
+  runner. It deliberately has no `pull_request` trigger: this repository is
+  public, and that trigger is the one thing that would let a fork run code on a
+  real machine. Pull requests belong on the hosted runners.
+
+A self-hosted runner for this project has to run as a **login item in a graphical
+session**, not as a system daemon — `make smoke` launches a real app and needs a
+window server. If the runner's user is logged out, jobs queue rather than fail.
+
 ## Why the updater is opt-in at build time
 
 macOS loads a framework into a process only when both carry the same Apple team
