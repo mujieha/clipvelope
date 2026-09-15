@@ -21,9 +21,20 @@ name: CI (macOS 27)
 # this workflow ever needs to run against a contribution, run it by hand with
 # workflow_dispatch after reading the diff.
 
+# PARKED until a self-hosted runner exists again. The push trigger is commented
+# out deliberately: with no runner carrying these labels, every push would queue
+# a job that waits indefinitely rather than failing, which looks like a broken
+# repository. Restore the two `push` lines when the runner is registered.
+#
+# The first attempt ran the runner as a separate `ci` user, which does not work
+# for this project: `make smoke` launches the app and reads the window list, and
+# a fast-user-switched *background* session cannot do either --
+# CGWindowListCopyWindowInfo returns nil there, so the check cannot observe the
+# panel even when it opens. A runner for this suite needs a session that is
+# always in the foreground, which in practice means a virtual machine.
 on:
-  push:
-    branches: [main, develop]
+  # push:
+  #   branches: [main, develop]
   workflow_dispatch:
 
 concurrency:
