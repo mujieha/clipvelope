@@ -825,6 +825,16 @@ private struct UpdateReminderLine: View {
                 .padding(.vertical, 5)
                 // The whole strip is the target, not just the words.
                 .contentShape(Rectangle())
+                // Every row of this panel paints its own opaque background, and
+                // a row that does not is not merely plain -- the panel's window
+                // is vibrant, so whatever window happens to be behind it shows
+                // through. This row shipped without one and the result was a
+                // band that changed shape as other windows moved, ending
+                // wherever the window behind it ended. The same trap is
+                // documented above the list, which needs a background for the
+                // same reason; match what StateStrip and the footer do.
+                .frame(maxWidth: .infinity)
+                .background(Color(NSColor.controlBackgroundColor))
             }
             .buttonStyle(.plain)
             .accessibilityHint("Opens the update window, in front, so you can install it.")
