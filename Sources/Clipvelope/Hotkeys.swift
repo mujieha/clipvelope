@@ -201,23 +201,15 @@ extension KeyCombo {
 
 // MARK: - Opening the panel
 
-/// Whether the history panel is on screen. MenuBarExtra offers no way to ask,
-/// so the panel's own NSWindow is recorded when the content view lands in it
-/// and its visibility is read directly. A flag set from onAppear/onDisappear
-/// was tried first and stuck at "open": the window is hidden, not closed, when
-/// the panel loses focus, so onDisappear never fires and every later `--open`
-/// became a no-op.
+/// Whether the history panel is on screen.
+///
+/// Asked of the panel itself, which the app now owns -- nothing is remembered
+/// here. A flag set from onAppear/onDisappear was tried first and stuck at
+/// "open": the window is hidden, not closed, when the panel loses focus, so
+/// onDisappear never fires and every later `--open` became a no-op. Do not
+/// reintroduce one.
 enum PanelState {
-    weak static var window: NSWindow?
-    static var isOpen: Bool { window?.isVisible ?? false }
-}
-
-/// The view MenuKeyHandler installs in the panel; it exists to learn the window.
-final class PanelHostView: NSView {
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if let window { PanelState.window = window }
-    }
+    static var isOpen: Bool { MenuBarController.shared?.isPanelOpen ?? false }
 }
 
 enum PanelOpener {
@@ -249,64 +241,42 @@ enum PanelOpener {
     }
 
     /// Whether the menu bar item could be pressed right now.
+    ///
+    /// No longer a search through `NSApp.windows` for an `NSStatusBarButton`:
+    /// the app creates the status item itself, so the question is whether that
+    /// item got a button, which is a thing it can simply be asked.
     static var availability: Availability {
         // NSApp is created by SwiftUI, and isRunning turns true only once the
         // run loop is going. --status returns before either, so in that process
         // there is nothing to look at rather than nothing to find.
         guard let app = NSApp, app.isRunning else { return .notChecked }
-        return statusItemButton() == nil ? .missing : .found
+        guard let controller = MenuBarController.shared else { return .missing }
+        return controller.hasStatusItemButton ? .found : .missing
     }
 
-    /// Presses the menu bar item the way a click would, which is the only way to
-    /// open a MenuBarExtra window from code. Pressing it while open closes it.
+    /// Opens the history, or closes it if it is already open. What the menu bar
+    /// item does when clicked, and what ⌃⌥V does.
+    ///
+    /// This used to be `button.performClick(nil)`, which on macOS 27 is a silent
+    /// no-op because SwiftUI's MenuBarExtra leaves the button's target and
+    /// action nil. Now it calls the app's own code, and a click on the icon goes
+    /// through the same call.
     @discardableResult
     static func toggle() -> Bool {
-        guard let button = statusItemButton() else {
+        guard let controller = MenuBarController.shared else {
             NSLog("Clipvelope: menu bar item not found, cannot open the history")
             return false
         }
-        button.performClick(nil)
+        controller.toggle()
         return true
     }
 
+    /// `--open`: show the history and leave it showing. Deliberately not a
+    /// toggle -- a launcher that sends the request twice must not close what the
+    /// first one opened, and `scripts/smoke.sh` asks up to fifteen times.
     static func open() {
-        if !PanelState.isOpen { toggle() }
-    }
-
-    /// This app's status item button.
-    ///
-    /// Found by type, not by the containing window's class name. It used to
-    /// search only windows whose className was "NSStatusBarWindow", which is
-    /// private: the day AppKit renames it, ⌃⌥V -- how essentially everyone
-    /// opens this app -- stops working, and the only trace is one line in the
-    /// system log. NSStatusBarButton is public API, and is the thing that
-    /// actually has to be clicked, so it is the thing to look for.
-    ///
-    /// This process has exactly one status item, because the app declares
-    /// exactly one MenuBarExtra. Every window is searched and every hit
-    /// collected so that "more than one" is noticed rather than silently
-    /// picked over: it would mean the assumption above stopped holding.
-    private static func statusItemButton() -> NSStatusBarButton? {
-        var found: [NSStatusBarButton] = []
-        for window in NSApp?.windows ?? [] {
-            collectStatusButtons(in: window.contentView, into: &found)
-        }
-        if found.count > 1 {
-            NSLog("%@", "Clipvelope: expected one menu bar item, found \(found.count); pressing the first")
-        }
-        return found.first
-    }
-
-    private static func collectStatusButtons(in view: NSView?,
-                                             into found: inout [NSStatusBarButton]) {
-        guard let view else { return }
-        if let button = view as? NSStatusBarButton {
-            found.append(button)
-            return
-        }
-        for subview in view.subviews {
-            collectStatusButtons(in: subview, into: &found)
-        }
+        guard !PanelState.isOpen else { return }
+        toggle()
     }
 }
 
@@ -335,7 +305,7 @@ struct MenuKeyHandler: NSViewRepresentable {
     let onPreferences: () -> Void
 
     func makeNSView(context: Context) -> NSView {
-        let view = PanelHostView(frame: .zero)
+        let view = NSView(frame: .zero)
         context.coordinator.start(view: view)
         update(context.coordinator)
         return view

@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 /// behind whatever the user is looking at -- it is on screen, just invisible in
 /// practice. `orderFrontRegardless` raises a window without activation, which is
 /// the only thing that works for an agent app.
-private func bringSettingsWindowForward() {
+func bringSettingsWindowForward() {
     NSApp.activate(ignoringOtherApps: true)
     for window in NSApp.windows where window.canBecomeMain {
         // Otherwise macOS restores the window at the next launch, and a menu bar
@@ -42,45 +42,6 @@ struct PreferencesButton: View {
                 bringSettingsWindowForward()
             }
         })
-    }
-}
-
-/// The menu bar icon. It is also the one view that exists for as long as the
-/// app runs, which makes it the place to answer `Clipvelope --preferences`: the
-/// Settings scene opens through SwiftUI's own action, and that action only
-/// exists inside a view's environment.
-struct StatusItemLabel: View {
-    @Environment(\.openSettings) private var openSettings
-
-    /// The sealed envelope from the app icon, as a template so macOS recolours
-    /// it for light and dark menu bars. A bare `swift build` binary has no
-    /// bundle resources; it falls back to a system symbol.
-    private static let icon: NSImage? = {
-        guard let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "pdf"),
-              let image = NSImage(contentsOf: url) else { return nil }
-        image.isTemplate = true
-        image.size = NSSize(width: 18, height: 18)
-        return image
-    }()
-
-    var body: some View {
-        Label {
-            Text("Clipvelope")
-        } icon: {
-            if let icon = Self.icon {
-                Image(nsImage: icon)
-            } else {
-                Image(systemName: "envelope.fill")
-            }
-        }
-            .onReceive(DistributedNotificationCenter.default()
-                .publisher(for: RemoteControl.preferencesNotification)
-                .filter { RemoteControl.isAuthentic($0) }) { _ in
-                openSettings()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    bringSettingsWindowForward()
-                }
-            }
     }
 }
 
@@ -556,7 +517,11 @@ struct ClipboardMenuView: View {
     @FocusState private var searchFocused: Bool
     @Environment(\.openSettings) private var openSettings
 
-    private func closeMenuBarWindow() {
+    /// The panel is the app's key window whenever it is open -- that is what
+    /// lets the search field take a keystroke -- so closing the key window
+    /// closes the panel. `ClipboardStore.closePanelThenPaste` does the same
+    /// thing by the same route, and both are measured against `HistoryPanel`.
+    private func closePanelWindow() {
         NSApplication.shared.keyWindow?.close()
     }
 
@@ -595,7 +560,7 @@ struct ClipboardMenuView: View {
     }
 
     private func escape() {
-        if panel.escape() == .close { closeMenuBarWindow() }
+        if panel.escape() == .close { closePanelWindow() }
     }
 
     private func showPreferences() {
@@ -605,11 +570,11 @@ struct ClipboardMenuView: View {
         }
     }
 
-    /// An AppKit alert rather than SwiftUI's `.alert`: the popover closes the
+    /// An AppKit alert rather than SwiftUI's `.alert`: the panel closes the
     /// moment anything else becomes key, which took the SwiftUI alert down with
     /// it before either button could act. This closes the panel first, then asks.
     private func confirmClear() {
-        closeMenuBarWindow()
+        closePanelWindow()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             let alert = NSAlert()
             alert.alertStyle = .warning
@@ -759,8 +724,8 @@ struct ClipboardMenuView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         listBody
                     }
-                    // A ScrollView reports an ideal height of zero, and the
-                    // MenuBarExtra window sizes itself to fit its content, so a bare
+                    // A ScrollView reports an ideal height of zero, and the panel's
+                    // window sizes itself to fit this content, so a bare
                     // `maxHeight` collapsed the list to nothing. `fixedSize` is the
                     // wrong cure: it makes the ScrollView ignore the size its parent
                     // offers, so rows overflow and paint over the search field.
@@ -770,7 +735,7 @@ struct ClipboardMenuView: View {
                     }
                 }
                 .frame(height: min(max(contentHeight, 80), 420))
-                // Without this the list shows the popover's vibrancy material, so the
+                // Without this the list shows the window's vibrancy material, so the
                 // desktop bleeds through behind the rows while the search field and
                 // footer sit on a solid colour. Paint it to match them.
                 .background(Color(NSColor.controlBackgroundColor))
@@ -788,8 +753,9 @@ struct ClipboardMenuView: View {
         .frame(width: 380)
         .onAppear {
             panel = PanelModel()
-            // The popover window is created fresh each time the menu opens, so it
-            // needs the appearance applied then, not only when the theme changes.
+            // This view is built fresh each time the panel opens -- see
+            // MenuBarController.show() -- so it needs the appearance applied
+            // then, not only when the theme changes.
             AppearanceController.apply(store.themeMode)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 searchFocused = true

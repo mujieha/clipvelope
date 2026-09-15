@@ -18,7 +18,32 @@ jobs:
     # Clipvelope targets macOS 26, which needs the Xcode 26 SDK. Swift checks
     # availability against the deployment target, so an older image cannot build
     # this at all -- it is not merely a runtime concern.
-    runs-on: macos-26
+    #
+    # Why this is a matrix over the OS. macOS 26 is the declared floor and macOS
+    # 27 is what users are actually on, and they are not interchangeable: this
+    # project shipped a commit that was green here and, on 27, opened nothing at
+    # all. SwiftUI's MenuBarExtra stopped wiring its status item's target and
+    # action there, so the hotkey and `--open` -- the only two ways into the app
+    # -- became silent no-ops while every check on 26 passed. Running the UI
+    # smoke test on both is what catches that class of regression.
+    #
+    # macos-27 does not exist as a runner label yet. At the time of writing,
+    # actions/runner-images publishes macos-26 as the newest macOS image; the
+    # `xcode-27` image is Xcode 27 on an older macOS, which tests the SDK and not
+    # the operating system, so it is not a substitute. The entry is written out
+    # below and commented, so turning it on is a one-line change when the image
+    # ships. Do not uncomment it before then: an unavailable label does not skip
+    # the job, it fails the workflow.
+    #
+    # fail-fast is off so that a failure on one OS still reports the other, which
+    # is the whole point of running both.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-26
+          # - macos-27
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
 
     steps:
@@ -40,8 +65,12 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
-          restore-keys: ${{ runner.os }}-spm-
+          # Keyed on the image, not just on runner.os: a .build directory from a
+          # different macOS carries modules built against a different SDK, and
+          # restoring one across images is how a cache turns into a mystery
+          # build failure.
+          key: ${{ matrix.runner }}-spm-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          restore-keys: ${{ matrix.runner }}-spm-
 
       # The deployment target lives in two places, and this repository has
       # already shipped a tree where they disagreed and nothing compiled.
@@ -215,6 +244,9 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: Clipvelope-app
+          # One name per image. Two matrix jobs uploading under one name is an
+          # error, so the name has to carry the image for the second entry to be
+          # switchable without also fixing this.
+          name: Clipvelope-app-${{ matrix.runner }}
           path: dist/Clipvelope.app
           if-no-files-found: error
