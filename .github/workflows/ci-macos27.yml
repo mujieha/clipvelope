@@ -63,14 +63,15 @@ jobs:
       # This is the reason the workflow exists: everything below it also runs on
       # macOS 26, but `make smoke` is the only check that launches the app and
       # asks whether the history panel actually opens.
+      # One run, with coverage on, exactly as ci.yml does it. Running the suite
+      # first without coverage and again with it does not work: the second run
+      # has nothing to rebuild, so no profile data is written and the gate then
+      # fails with "no coverage data" on a tree whose tests all passed.
       - name: Build and test
-        run: ./scripts/test.sh
+        run: ./scripts/test.sh --enable-code-coverage
 
       - name: Coverage
-        run: |
-          set -euo pipefail
-          ./scripts/test.sh --enable-code-coverage
-          ./scripts/coverage-gate.sh
+        run: ./scripts/coverage-gate.sh
 
       - name: Package the app
         run: ./scripts/bundle.sh
