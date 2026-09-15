@@ -27,13 +27,27 @@ to them.
 ## Commands
 
 ```bash
+export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 make preflight                                    # read-only; refuses a tree that is not ready
-CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" make release
+make release
 make notarize TARGET=dist/Clipvelope.app          # staple the app first
-make dmg                                          # image now holds a stapled app
+make repack                                       # image built around the stapled app
 make notarize TARGET=dist/Clipvelope-<version>.dmg
 make appcast
 ```
+
+Two things about that sequence that have each cost a release.
+
+`CODESIGN_IDENTITY` must be the certificate's **common name**, exported so every
+step sees it. `bundle.sh` reads the team identifier out of the certificate by
+that name, so a SHA-1 hash — which `codesign` itself accepts — makes it fail
+with no message. And `make-dmg.sh` signs the image only when it is set, so an
+identity given to `make release` alone leaves you notarizing an unsigned image.
+
+`make repack`, not `make dmg`. `make dmg` rebuilds the app, which discards the
+notarization staple applied the step before and, because it does not set
+`CLIPVELOPE_SPARKLE`, drops the updater too. The image still builds and still
+looks right.
 
 `make preflight` reads the tree and refuses a release it is not ready for. It
 runs every check and reports all of them rather than stopping at the first:
@@ -160,11 +174,21 @@ feed. `Clipvelope --status` reports whether the feed answers with an appcast.
 3. `make check && make test`.
 4. Commit, then `make preflight`. It must print `ready to release`; it checks the
    working tree is clean, so run it after the commit and not before.
-5. `make release`, then notarize the app, rebuild the image, notarize the image,
-   then the quarantined check above. Notarizing the app before the image is
-   built is what lets a first launch succeed with no network: the app carries
-   its own ticket instead of having to ask Apple.
+5. `make release`, notarize the app, `make repack`, notarize the image, then the
+   quarantined check above. Notarizing the app before the image is built is what
+   lets a first launch succeed with no network: the app carries its own ticket
+   instead of having to ask Apple. `make repack` rather than `make dmg` — see
+   the note under Commands.
 6. `make appcast`, publish the DMG and the appcast together.
+7. Before publishing, rehearse the update itself. Serve `dist/` over HTTP,
+   regenerate the feed against it with
+   `CLIPVELOPE_DOWNLOAD_PREFIX=http://localhost:<port>/`, point a copy of the
+   *previous* release at it with
+   `defaults write com.mujieha.Clipvelope SUFeedURL http://localhost:<port>/appcast.xml`,
+   and let it update. Sparkle refuses a `file://` feed, so it has to be served.
+   Delete that default afterwards, or the installed app keeps asking a server
+   that is no longer there. This is the only check that proves the thing a
+   release exists to do, and every part of it fails silently.
 
 ## The vault across updates
 

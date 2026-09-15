@@ -45,6 +45,17 @@ icon: app
 dmg:
 	./scripts/make-dmg.sh
 
+# Rebuild the disk image around the app already sitting in dist/, without
+# rebuilding the app itself.
+#
+# This is the step that follows notarizing the app, and it cannot be `make dmg`:
+# that rebuilds, which throws away the notarization staple just applied and --
+# because it does not set CLIPVELOPE_SPARKLE -- drops the updater as well. The
+# result looks correct and is not, which is exactly the kind of release mistake
+# this project keeps finding after the fact.
+repack:
+	CLIPVELOPE_SPARKLE=1 SKIP_BUILD=yes ./scripts/make-dmg.sh
+
 # A build with the updater. Needs a real Apple identity: macOS will not load an
 # embedded framework into an ad-hoc signed process.
 #
