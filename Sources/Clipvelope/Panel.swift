@@ -86,6 +86,65 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         return fallback
     }()
 
+    /// The same icon with a small filled dot in its top-right corner, shown
+    /// while a background update check has found a new version.
+    ///
+    /// Why a dot cut into the template image, rather than a coloured badge or a
+    /// different glyph. It has to satisfy two constraints at once and this is
+    /// the only signal that satisfies both without a second decision. A template
+    /// image is recoloured by macOS to match the menu bar it is drawn in, so the
+    /// dot reads on a light menu bar and on a dark one for free, and it keeps
+    /// reading under Reduce Transparency, on a tinted desktop, and in the
+    /// high-contrast appearances — none of which a hard-coded colour survives.
+    /// And a plain dot is not an error: red, a badge count, or an exclamation
+    /// mark would say something is wrong, and nothing is wrong. A new version
+    /// being available is news, not a fault.
+    ///
+    /// The transparent moat is what makes it a mark rather than a lump on the
+    /// envelope's corner: without it the dot merges into the glyph at the small
+    /// sizes a menu bar uses, since both are painted the same colour.
+    ///
+    /// `NSImage(size:flipped:drawingHandler:)` rather than `lockFocus`, so it is
+    /// redrawn at whatever scale the screen it lands on needs instead of being
+    /// rasterised once at the scale of whichever display was attached at launch.
+    private static func marked(_ base: NSImage) -> NSImage {
+        let size = base.size
+        let image = NSImage(size: size, flipped: false) { rect in
+            base.draw(in: rect)
+            let diameter = rect.width * 0.34
+            let dot = NSRect(x: rect.maxX - diameter, y: rect.maxY - diameter,
+                             width: diameter, height: diameter)
+            guard let context = NSGraphicsContext.current else { return true }
+            context.compositingOperation = .clear
+            NSBezierPath(ovalIn: dot.insetBy(dx: -1.25, dy: -1.25)).fill()
+            context.compositingOperation = .sourceOver
+            // Colour is irrelevant for a template image -- macOS masks it and
+            // paints its own -- but something has to be filled.
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    private static let markedIcon: NSImage? = icon.map(marked)
+
+    /// Whether the menu bar item says an update is waiting.
+    ///
+    /// Called by `UpdateReminder`, which is the only thing that knows. The
+    /// tooltip and the accessibility label change with the image: a mark that
+    /// VoiceOver cannot read is not a signal to everyone, and a dot with no
+    /// explanation is a puzzle. Both go back to plain "Clipvelope" when the mark
+    /// is cleared -- the app tells the truth about its own state.
+    func setUpdateWaiting(_ waiting: Bool) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let button = statusItem.button else { return }
+        button.image = waiting ? (Self.markedIcon ?? Self.icon) : Self.icon
+        button.setAccessibilityLabel(waiting ? "Clipvelope, an update is ready" : "Clipvelope")
+        button.toolTip = waiting ? "Clipvelope — an update is ready" : "Clipvelope"
+    }
+
     private func configureStatusItem() {
         // Nil when the menu bar has no room left for another item. There is
         // nothing to be done about it here, but it is the one state in which the

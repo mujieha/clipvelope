@@ -739,3 +739,63 @@ final class StoreIntegrationTests: XCTestCase {
         XCTAssertTrue(makeStore().ignoredAppBundleIDs.isEmpty)
     }
 }
+
+/// The rule behind Sparkle's gentle reminders.
+///
+/// The path itself cannot be driven from a test: it needs a signed Sparkle
+/// build, a served appcast and a version newer than the one running. What a test
+/// *can* hold is the decision, which is why the decision is a pure function and
+/// not four lines inside four delegate callbacks.
+final class UpdateReminderPolicyTests: XCTestCase {
+    func testSparkleShowsItOnlyWhenTheUserIsAlreadyLookingAtTheApp() {
+        XCTAssertEqual(
+            UpdateReminderPolicy.handling(appHasUserAttention: true,
+                                          sparkleProposesImmediateFocus: true),
+            .sparkleShowsIt)
+    }
+
+    func testWithoutAttentionTheMenuBarTakesTheJob() {
+        // The measured failure: a scheduled check fires while the user is in
+        // another application, and Sparkle's window opens behind their work.
+        XCTAssertEqual(
+            UpdateReminderPolicy.handling(appHasUserAttention: false,
+                                          sparkleProposesImmediateFocus: true),
+            .markTheMenuBar)
+        XCTAssertEqual(
+            UpdateReminderPolicy.handling(appHasUserAttention: false,
+                                          sparkleProposesImmediateFocus: false),
+            .markTheMenuBar)
+    }
+
+    func testAttentionAloneIsNotEnoughWhenSparkleWillNotShowItInFocus() {
+        XCTAssertEqual(
+            UpdateReminderPolicy.handling(appHasUserAttention: true,
+                                          sparkleProposesImmediateFocus: false),
+            .markTheMenuBar)
+    }
+
+    func testOnlyAnUpdateThisAppTookResponsibilityForLeavesAMark() {
+        XCTAssertTrue(UpdateReminderPolicy.isMarked(
+            after: .willShowUpdate(handledBySparkle: false, userInitiated: false)))
+    }
+
+    func testAnUpdateSparkleIsShowingNeedsNoMark() {
+        XCTAssertFalse(UpdateReminderPolicy.isMarked(
+            after: .willShowUpdate(handledBySparkle: true, userInitiated: false)))
+    }
+
+    func testACheckTheUserAskedForNeedsNoMark() {
+        XCTAssertFalse(UpdateReminderPolicy.isMarked(
+            after: .willShowUpdate(handledBySparkle: true, userInitiated: true)))
+        XCTAssertFalse(UpdateReminderPolicy.isMarked(
+            after: .willShowUpdate(handledBySparkle: false, userInitiated: true)))
+    }
+
+    /// A mark that outlives the update it announced is the same defect as no
+    /// mark at all, so both ways an update stops waiting clear it -- including
+    /// the one where nobody ever looked at it.
+    func testTheMarkIsClearedWhenTheUpdateStopsWaiting() {
+        XCTAssertFalse(UpdateReminderPolicy.isMarked(after: .userGaveAttention))
+        XCTAssertFalse(UpdateReminderPolicy.isMarked(after: .sessionFinished))
+    }
+}

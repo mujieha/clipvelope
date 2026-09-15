@@ -763,6 +763,7 @@ struct ClipboardMenuView: View {
             Divider()
             StateStrip(store: store)
             Divider()
+            UpdateReminderLine()
             footer
         }
         .frame(width: 380)
@@ -782,6 +783,53 @@ struct ClipboardMenuView: View {
                                    onSubmitPlainText: copySelectedAsPlainText,
                                    onEscape: escape,
                                    onPreferences: showPreferences))
+    }
+}
+
+// MARK: - The update reminder
+
+/// One line above the footer, and only while a background update check has
+/// found a new version.
+///
+/// The menu bar icon's dot is the persistent signal; this is what makes it
+/// actionable. Someone who notices the dot opens the panel to find out what it
+/// meant, and without this the only route from there to the waiting update is
+/// Preferences — two windows away from the icon that was trying to say
+/// something. A reminder, not a feature: one line, and it is gone the moment
+/// the update is.
+///
+/// It draws nothing in a build without an updater. `bringUpdateForward` is only
+/// ever set by `UpdaterController`, so in a build with no Sparkle it stays nil
+/// and this returns an empty view — the same rule the rest of `Updater.swift`
+/// follows.
+private struct UpdateReminderLine: View {
+    @ObservedObject private var reminder = UpdateReminder.shared
+
+    var body: some View {
+        if reminder.isWaiting, let bringUpdateForward = reminder.bringUpdateForward {
+            Button(action: bringUpdateForward) {
+                HStack(spacing: 5) {
+                    // Not an error icon and not a badge count: a new version is
+                    // news, not a fault. The same judgement as the menu bar dot.
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(.tint)
+                        .accessibilityHidden(true)
+                    Text("A new version is ready")
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Text("Show")
+                        .foregroundColor(.secondary)
+                }
+                .font(.system(size: 11))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                // The whole strip is the target, not just the words.
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the update window, in front, so you can install it.")
+            Divider()
+        }
     }
 }
 

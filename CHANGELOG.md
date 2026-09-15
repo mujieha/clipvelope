@@ -30,6 +30,12 @@ update prompt; `make appcast` takes it from here.
   finger, so the click is confirmed without looking. Macs without a Force Touch
   trackpad feel nothing and behave exactly as before, and your trackpad
   settings decide the strength — Clipvelope adds no setting of its own.
+- When the daily check finds a new version, the menu bar icon says so with a
+  small dot instead of a window opening behind your work, where it used to be
+  easy to miss entirely. Nothing interrupts you: open Clipvelope when you like
+  and a line above the buttons offers the update. The dot goes away as soon as
+  you have seen it. A check you start yourself still opens the update window
+  straight away, in front.
 
 ### Better
 
