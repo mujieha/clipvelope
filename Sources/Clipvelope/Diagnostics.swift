@@ -47,11 +47,9 @@ enum Diagnostics {
     }
 
     private static func signalRunningInstance(_ name: Notification.Name) -> Never {
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.mujieha.Clipvelope"
-        let me = ProcessInfo.processInfo.processIdentifier
-        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-            .filter { $0.processIdentifier != me }
-        guard !running.isEmpty else {
+        // Same question the single-instance guard asks, and the same answer:
+        // every copy in this login session except this one. See SingleInstance.
+        guard !SingleInstance.otherInstances().isEmpty else {
             print("Clipvelope is not running.")
             exit(1)
         }

@@ -70,4 +70,21 @@ final class RemoteControlTests: XCTestCase {
         XCTAssertFalse(PanelOpener.Availability.notChecked.summary.contains("found"))
         XCTAssertTrue(PanelOpener.Availability.missing.summary.hasPrefix("NOT FOUND"))
     }
+
+    // MARK: - Who counts as another instance
+    //
+    // `--open` and the single-instance guard ask the same question of the same
+    // list, and the list always contains the process doing the asking. Counting
+    // itself would make `--open` claim an instance that is not there and make
+    // every launch quit on the spot.
+
+    func testAProcessDoesNotCountItselfAsAnotherInstance() {
+        XCTAssertEqual(SingleInstance.others(in: [4242], excluding: 4242), [])
+        XCTAssertEqual(SingleInstance.others(in: [], excluding: 4242), [])
+    }
+
+    func testEveryOtherProcessInTheSessionCounts() {
+        XCTAssertEqual(SingleInstance.others(in: [17, 4242, 31], excluding: 4242), [17, 31])
+        XCTAssertEqual(SingleInstance.others(in: [17], excluding: 4242), [17])
+    }
 }

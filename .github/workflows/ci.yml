@@ -199,9 +199,18 @@ jobs:
           plist="$APP/Contents/Info.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "com.mujieha.Clipvelope"
-          # One deletion from being lost, and its absence is invisible until a
-          # user has two copies running and fighting over the global hotkeys.
-          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMultipleInstancesProhibited' "$plist")" = "true"
+          # This key must stay out. 0.2.0 briefly carried it to stop two copies
+          # fighting over the global hotkeys, but Launch Services enforces it
+          # per machine rather than per login session: while one user had
+          # Clipvelope running, a second logged-in user could not launch it at
+          # all (-10829, kLSMultipleSessionsNotSupportedErr). Single instance is
+          # enforced inside the session now, in SingleInstance. Putting the key
+          # back would lock out everyone else on a shared Mac, and it is the
+          # kind of change that looks harmless in a diff.
+          if /usr/libexec/PlistBuddy -c 'Print :LSMultipleInstancesProhibited' "$plist" >/dev/null 2>&1; then
+            echo "LSMultipleInstancesProhibited is back: it stops a second logged-in user launching the app"
+            exit 1
+          fi
 
           # The icon is compiled from Resources/Clipvelope.icon by bundle.sh. A
           # mismatch between Info.plist and the files shows up as a blank generic

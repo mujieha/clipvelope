@@ -43,10 +43,22 @@ trap 'rm -rf "$TMP"' EXIT
 # window such as Preferences. The size floors keep a stray zero-sized or
 # placeholder window from being mistaken for either: a window nobody can see is
 # not an open panel, whatever the window server lists.
+#
+# It exits 2, and says why on stderr, when the window list cannot be read at
+# all. CGWindowListCopyWindowInfo returns nil in a session with no window server
+# -- a fast-user-switched background session, for one -- and the force-cast this
+# used to do trapped there, printing "Trace/BPT trap: 5" into the middle of the
+# diagnostics that were supposed to explain a failure. That is the worst moment
+# to crash, and "could not look" is not the same answer as "the panel is closed".
 cat > "$TMP/windows.swift" <<'EOF'
 import CoreGraphics
+import Foundation
 
-let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as! [[String: Any]]
+guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+    FileHandle.standardError.write(Data(
+        "cannot read the window list: this session has no window server\n".utf8))
+    exit(2)
+}
 let mine = list.filter { ($0["kCGWindowOwnerName"] as? String) == "Clipvelope" }
 
 func showing(layer: Int, minWidth: CGFloat, minHeight: CGFloat) -> Bool {
@@ -74,10 +86,29 @@ print("preferences: \(showing(layer: 0, minWidth: 200, minHeight: 200) ? "open" 
 EOF
 swiftc -O -o "$TMP/windows" "$TMP/windows.swift"
 
+# Waits for the copy that was running to be gone before starting another one.
+# The app is single-instance within a login session -- see SingleInstance -- so
+# a launch that overlaps the old process quitting hands over to it and exits,
+# and the test then reports an app that "did not start" when what really
+# happened is that it declined to be the second copy. The extra second is for
+# Launch Services, whose list of running applications lags the process table.
+wait_for_exit() {
+    for _ in $(seq 1 20); do
+        pgrep -f "$BIN" >/dev/null || break
+        sleep 0.5
+    done
+    sleep 1
+}
+
 was_running=0
 if pgrep -f "$BIN" >/dev/null; then was_running=1; fi
 pkill -f "$BIN" 2>/dev/null || true
-sleep 1
+wait_for_exit
+
+# Exit 1 means the app ran and a window that should have appeared did not.
+# Exit 2 means the test could not be run at all, which is a different answer and
+# has to read as one.
+NO_WINDOW_SERVER=2
 
 fail() {
     echo "smoke: FAIL: $1" >&2
@@ -85,6 +116,29 @@ fail() {
     "$TMP/windows" >&2 || true
     pkill -f "$BIN" 2>/dev/null || true
     exit 1
+}
+
+# Refreshes $TMP/report with what the window lister can see, and abandons the
+# run -- with its own wording and its own exit status -- when the window list
+# cannot be read at all.
+#
+# Callers grep the file afterwards instead of piping the lister into grep. A
+# pipeline would run this in a subshell, where the exit below would end the
+# subshell and leave the script walking on as though the windows had merely
+# been closed; and pipefail or not, grep's status is what an `if` would see.
+refresh_windows() {
+    local status=0
+    "$TMP/windows" > "$TMP/report" 2> "$TMP/report.err" || status=$?
+    if [ "$status" -eq "$NO_WINDOW_SERVER" ]; then
+        echo "smoke: CANNOT RUN: $(cat "$TMP/report.err")" >&2
+        echo "smoke: nothing could be looked at, so this says nothing about whether the panel opens." >&2
+        pkill -f "$BIN" 2>/dev/null || true
+        exit "$NO_WINDOW_SERVER"
+    fi
+    if [ "$status" -ne 0 ]; then
+        cat "$TMP/report.err" >&2
+        fail "the window lister exited $status"
+    fi
 }
 
 open "$APP"
@@ -102,7 +156,8 @@ for _ in $(seq 1 15); do
     sleep 2
     "$BIN" --open >/dev/null 2>&1 || true
     sleep 1
-    if "$TMP/windows" | grep -q '^history-panel: open$'; then opened=1; break; fi
+    refresh_windows
+    if grep -q '^history-panel: open$' "$TMP/report"; then opened=1; break; fi
 done
 [ "$opened" = 1 ] || fail "the history panel did not open within 45s"
 echo "smoke: history panel opened"
@@ -110,14 +165,15 @@ echo "smoke: history panel opened"
 "$BIN" --preferences
 for _ in $(seq 1 10); do
     sleep 1
-    if "$TMP/windows" | grep -q '^preferences: open$'; then break; fi
+    refresh_windows
+    if grep -q '^preferences: open$' "$TMP/report"; then break; fi
 done
-"$TMP/windows" | grep -q '^preferences: open$' || fail "Preferences did not open within 10s"
+grep -q '^preferences: open$' "$TMP/report" || fail "Preferences did not open within 10s"
 echo "smoke: Preferences opened"
 
 pkill -f "$BIN" 2>/dev/null || true
 if [ "$was_running" = 1 ]; then
-    sleep 1
+    wait_for_exit
     open "$APP"
     echo "smoke: relaunched the instance that was running before"
 fi
