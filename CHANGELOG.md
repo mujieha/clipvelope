@@ -26,6 +26,10 @@ update prompt; `make appcast` takes it from here.
   send it away, or leave it and it goes on its own. Nothing is shown when a
   paste works: the text appearing where you were typing is the message. It
   needs no notification permission.
+- Pinning or deleting a row with the trackpad gives a small tap under your
+  finger, so the click is confirmed without looking. Macs without a Force Touch
+  trackpad feel nothing and behave exactly as before, and your trackpad
+  settings decide the strength — Clipvelope adds no setting of its own.
 
 ### Better
 

@@ -348,7 +348,19 @@ struct HistoryRow: View {
     @ViewBuilder
     private var trailing: some View {
         if isHovering {
-            Button(action: { store.togglePin(item) }) {
+            // The haptic calls are here rather than in the store on purpose.
+            // Pinning and deleting also happen from paths with no pointer
+            // anywhere near them -- an import, an eviction when the history
+            // reaches its cap, Delete Everything, and the removal of a row
+            // whose image payload turned out to be missing -- and a tap for
+            // those would be unfelt at best and wrong at worst. These two
+            // buttons exist only while the pointer is over the row, which is
+            // the condition a Force Touch trackpad requires before it will
+            // perform feedback at all. See Haptics.swift.
+            Button(action: {
+                Haptics.rowPinned()
+                store.togglePin(item)
+            }) {
                 Image(systemName: item.isPinned ? "pin.slash" : "pin")
             }
             .buttonStyle(.plain)
@@ -356,7 +368,10 @@ struct HistoryRow: View {
             .help(item.isPinned ? "Unpin" : "Pin")
             .accessibilityLabel(item.isPinned ? "Unpin this item" : "Pin this item")
 
-            Button(action: { store.remove(item) }) {
+            Button(action: {
+                Haptics.rowDeleted()
+                store.remove(item)
+            }) {
                 Image(systemName: "trash")
             }
             .buttonStyle(.plain)
