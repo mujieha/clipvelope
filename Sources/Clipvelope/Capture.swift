@@ -57,24 +57,72 @@ final class ClipboardMonitor {
     static let maxTextBytes = 2 * 1024 * 1024
 
     private var timer: Timer?
+    /// The interval the installed timer was built with, so a tick can tell
+    /// whether the rate the policy now asks for is a different one.
+    private var scheduledInterval: TimeInterval?
     private var lastChangeCount: Int = NSPasteboard.general.changeCount
+    /// When the pasteboard last actually changed, which is what the back-off
+    /// schedule is a function of.
+    private var lastChangeAt = Date()
     var onNewContent: ((CapturedItem) -> Void)?
 
+    /// Pausing keeps polling and keeps advancing `lastChangeCount`, so that
+    /// resuming does not capture whatever was copied while paused.
+    ///
+    /// It deliberately gets no third, slower rate of its own. The poll is the
+    /// only thing that advances `lastChangeCount`, so the interval is exactly
+    /// the width of the window in which something copied just before the user
+    /// resumes is still unseen -- and therefore captured on resume, which is
+    /// the one thing pausing promises not to do. Backing off further while
+    /// paused would widen that window to buy wakeups back only while the
+    /// feature is switched off.
     var isPaused = false
     var skipConcealed = true
     var ignoredBundleIDs: Set<String> = []
 
     func start() {
         guard timer == nil else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
-            self?.checkPasteboard()
-        }
-        RunLoop.main.add(timer!, forMode: .common)
+        // Start in the active window: the app has just launched, the user is at
+        // the machine, and the first seconds are when a capture is most likely
+        // to be waited on.
+        lastChangeAt = Date()
+        schedule(interval: PollingPolicy.interval(sinceLastChange: 0))
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        scheduledInterval = nil
+    }
+
+    /// Installs the repeating poll at `interval`, replacing whatever was there.
+    /// The one place a timer is created, so `start()` and the back-off path
+    /// cannot disagree or leave two of them running.
+    private func schedule(interval: TimeInterval) {
+        timer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        // .common so the poll keeps firing while a menu is tracking; in the
+        // default mode alone, opening the menu bar item would stop capture.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        scheduledInterval = interval
+    }
+
+    /// Poll, then re-rate. Rescheduling rather than deciding to do nothing on
+    /// each tick is the whole point: a 0.6 s timer that wakes up to skip its own
+    /// body is exactly the wakeup the back-off is meant to remove.
+    private func tick() {
+        checkPasteboard()
+        // checkPasteboard can reach the app through onNewContent, which may have
+        // stopped the monitor; do not resurrect a timer it just invalidated.
+        guard timer != nil else { return }
+
+        let wanted = PollingPolicy.interval(sinceLastChange: Date().timeIntervalSince(lastChangeAt))
+        if wanted != scheduledInterval {
+            schedule(interval: wanted)
+        }
     }
 
     private func checkPasteboard() {
@@ -82,9 +130,31 @@ final class ClipboardMonitor {
         // Always advance the change count, even when skipping, so a skipped item
         // is not re-examined on the next tick.
         if pb.changeCount == lastChangeCount { return }
+        // Counted before lastChangeCount moves. The counter advances once per
+        // write, so a jump of more than one says the pasteboard was overwritten
+        // between polls and those items are unrecoverable -- they are not on the
+        // pasteboard any more. Logged rather than shown: telling someone they
+        // lost a copy they cannot get back is noise, not truth-telling, but
+        // leaving the condition entirely invisible is how a 2.5 s idle rate
+        // survived a release.
+        let missed = CapturePolicy.missedChanges(previousCount: lastChangeCount,
+                                                 currentCount: pb.changeCount)
         lastChangeCount = pb.changeCount
+        // Stamped before the pause check, and before any policy or size rule can
+        // refuse the item: the schedule is a function of pasteboard activity,
+        // not of what was kept. Somebody copying passwords is at the keyboard.
+        //
+        // This is also the whole of the monitor's response to `missed`, and it
+        // is why no extra one is needed: any observed change already drops the
+        // rate back to `active`, so a burst is polled quickly from its second
+        // item on whether or not the first was missed.
+        lastChangeAt = Date()
 
         if isPaused { return }
+
+        if missed > 0 {
+            NSLog("%@", "Clipvelope: the pasteboard changed \(missed + 1) times between two polls; \(missed) item(s) were overwritten before they could be read. Idle poll is \(PollingPolicy.idle)s.")
+        }
 
         let types = (pb.types ?? []).map(\.rawValue)
         // The pasteboard does not record who wrote to it; the frontmost app at
@@ -162,7 +232,13 @@ final class ClipboardMonitor {
         // order of magnitude larger for the same picture.
         let raw: Data
         let isPNG: Bool
-        if let png = pb.data(forType: .png) {
+        // The signature, not the type, decides. Any process can register bytes
+        // of its choosing under `public.png`, and taking that word for it stored
+        // them verbatim as an item labelled `public.png` -- which import,
+        // `copyToPasteboard` and `thumbnail` all then refuse, so the entry
+        // deletes itself later saying its file was missing. Bytes that are not a
+        // PNG fall through to the TIFF branch, which re-encodes a real one.
+        if let png = pb.data(forType: .png), png.starts(with: pngSignature) {
             (raw, isPNG) = (png, true)
         } else if let tiff = pb.data(forType: .tiff) {
             (raw, isPNG) = (tiff, false)

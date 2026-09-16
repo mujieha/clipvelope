@@ -1,0 +1,97 @@
+name: CI (macOS 27)
+
+# The hosted runners only go up to macOS 26, which is this project's floor. This
+# workflow covers the OS users are actually on, on a self-hosted runner.
+#
+# Why it is worth a second workflow at all: a commit once passed every check on
+# macOS 26 and, on 27, opened nothing. SwiftUI's MenuBarExtra stopped wiring its
+# status item's target and action there, so the keyboard shortcut and --open --
+# the only two ways into the app -- became silent no-ops. Nothing in a headless
+# test can see that; only launching the app on that OS can.
+#
+# SECURITY -- read before adding a trigger.
+#
+# This repository is public, and a self-hosted runner executes whatever the
+# workflow says on a real machine. The single rule that keeps that safe is the
+# trigger list below: there is deliberately **no `pull_request`**, so code from
+# a fork has no way to reach this runner. Pull requests are covered by ci.yml on
+# GitHub's hosted runners, which is where untrusted code belongs.
+#
+# Do not add `pull_request`, `pull_request_target`, or `issue_comment` here. If
+# this workflow ever needs to run against a contribution, run it by hand with
+# workflow_dispatch after reading the diff.
+
+# PARKED until a self-hosted runner exists again. The push trigger is commented
+# out deliberately: with no runner carrying these labels, every push would queue
+# a job that waits indefinitely rather than failing, which looks like a broken
+# repository. Restore the two `push` lines when the runner is registered.
+#
+# The first attempt ran the runner as a separate `ci` user, which does not work
+# for this project: `make smoke` launches the app and reads the window list, and
+# a fast-user-switched *background* session cannot do either --
+# CGWindowListCopyWindowInfo returns nil there, so the check cannot observe the
+# panel even when it opens. A runner for this suite needs a session that is
+# always in the foreground, which in practice means a virtual machine.
+on:
+  # push:
+  #   branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci27-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    # The runner is registered with these labels; `macos-27` is the one that
+    # distinguishes it from any future self-hosted machine.
+    runs-on: [self-hosted, macOS, ARM64, macos-27]
+    timeout-minutes: 45
+
+    steps:
+      # A self-hosted runner reuses its workspace between jobs, unlike a hosted
+      # one. Start from a known state so a previous run cannot mask a failure.
+      - name: Clean the workspace
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          git clean -xfd -e .build || true
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          swift --version
+          echo "developer dir: $(xcode-select -p)"
+
+      # This is the reason the workflow exists: everything below it also runs on
+      # macOS 26, but `make smoke` is the only check that launches the app and
+      # asks whether the history panel actually opens.
+      # One run, with coverage on, exactly as ci.yml does it. Running the suite
+      # first without coverage and again with it does not work: the second run
+      # has nothing to rebuild, so no profile data is written and the gate then
+      # fails with "no coverage data" on a tree whose tests all passed.
+      - name: Build and test
+        run: ./scripts/test.sh --enable-code-coverage
+
+      - name: Coverage
+        run: ./scripts/coverage-gate.sh
+
+      - name: Package the app
+        run: ./scripts/bundle.sh
+
+      - name: Smoke test the UI on macOS 27
+        run: ./scripts/smoke.sh
+
+      # `swift build` deletes Package.resolved when it runs without Sparkle, and
+      # a dirty tree would fail the next run's clean step for the wrong reason.
+      - name: Leave the tree as we found it
+        if: always()
+        run: git checkout Package.resolved || true

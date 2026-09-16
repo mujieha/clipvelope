@@ -201,51 +201,82 @@ extension KeyCombo {
 
 // MARK: - Opening the panel
 
-/// Whether the history panel is on screen. MenuBarExtra offers no way to ask,
-/// so the panel's own NSWindow is recorded when the content view lands in it
-/// and its visibility is read directly. A flag set from onAppear/onDisappear
-/// was tried first and stuck at "open": the window is hidden, not closed, when
-/// the panel loses focus, so onDisappear never fires and every later `--open`
-/// became a no-op.
+/// Whether the history panel is on screen.
+///
+/// Asked of the panel itself, which the app now owns -- nothing is remembered
+/// here. A flag set from onAppear/onDisappear was tried first and stuck at
+/// "open": the window is hidden, not closed, when the panel loses focus, so
+/// onDisappear never fires and every later `--open` became a no-op. Do not
+/// reintroduce one.
 enum PanelState {
-    weak static var window: NSWindow?
-    static var isOpen: Bool { window?.isVisible ?? false }
-}
-
-/// The view MenuKeyHandler installs in the panel; it exists to learn the window.
-final class PanelHostView: NSView {
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if let window { PanelState.window = window }
-    }
+    static var isOpen: Bool { MenuBarController.shared?.isPanelOpen ?? false }
 }
 
 enum PanelOpener {
-    /// Presses the menu bar item the way a click would, which is the only way to
-    /// open a MenuBarExtra window from code. Pressing it while open closes it.
-    @discardableResult
-    static func toggle() -> Bool {
-        for window in NSApp.windows where window.className == "NSStatusBarWindow" {
-            if let button = statusButton(in: window.contentView) {
-                button.performClick(nil)
-                return true
+    /// What can be said about the menu bar item, which is the app's only entry
+    /// point: ⌃⌥V and `--open` both press it.
+    ///
+    /// Three cases, not two. Before SwiftUI starts there is no status item and
+    /// no way to look for one, so answering "not found" there would report a
+    /// fault that has not happened. `--status` runs in exactly that process.
+    enum Availability: Equatable {
+        case found
+        case missing
+        /// Nobody looked, because there was nothing yet to look at.
+        case notChecked
+
+        /// The `--status` line. The three cases must read differently from one
+        /// another: a word that sounds like a working app is a lie in the two
+        /// cases where nothing was pressed.
+        var summary: String {
+            switch self {
+            case .found:
+                return "found"
+            case .missing:
+                return "NOT FOUND - the shortcut cannot open the history"
+            case .notChecked:
+                return "not checked (--status exits before the UI starts)"
             }
         }
-        NSLog("Clipvelope: menu bar item not found, cannot open the history")
-        return false
     }
 
-    static func open() {
-        if !PanelState.isOpen { toggle() }
+    /// Whether the menu bar item could be pressed right now.
+    ///
+    /// No longer a search through `NSApp.windows` for an `NSStatusBarButton`:
+    /// the app creates the status item itself, so the question is whether that
+    /// item got a button, which is a thing it can simply be asked.
+    static var availability: Availability {
+        // NSApp is created by SwiftUI, and isRunning turns true only once the
+        // run loop is going. --status returns before either, so in that process
+        // there is nothing to look at rather than nothing to find.
+        guard let app = NSApp, app.isRunning else { return .notChecked }
+        guard let controller = MenuBarController.shared else { return .missing }
+        return controller.hasStatusItemButton ? .found : .missing
     }
 
-    private static func statusButton(in view: NSView?) -> NSStatusBarButton? {
-        guard let view else { return nil }
-        if let button = view as? NSStatusBarButton { return button }
-        for subview in view.subviews {
-            if let button = statusButton(in: subview) { return button }
+    /// Opens the history, or closes it if it is already open. What the menu bar
+    /// item does when clicked, and what ⌃⌥V does.
+    ///
+    /// This used to be `button.performClick(nil)`, which on macOS 27 is a silent
+    /// no-op because SwiftUI's MenuBarExtra leaves the button's target and
+    /// action nil. Now it calls the app's own code, and a click on the icon goes
+    /// through the same call.
+    @discardableResult
+    static func toggle() -> Bool {
+        guard let controller = MenuBarController.shared else {
+            NSLog("Clipvelope: menu bar item not found, cannot open the history")
+            return false
         }
-        return nil
+        controller.toggle()
+        return true
+    }
+
+    /// `--open`: show the history and leave it showing. Deliberately not a
+    /// toggle -- a launcher that sends the request twice must not close what the
+    /// first one opened, and `scripts/smoke.sh` asks up to fifteen times.
+    static func open() {
+        guard !PanelState.isOpen else { return }
+        toggle()
     }
 }
 
@@ -253,22 +284,28 @@ enum PanelOpener {
 
 /// The keys the history panel answers to while the search field has focus:
 /// Tab accepts the autocomplete suggestion, ↑↓ move the selection, Return copies
-/// it, Escape clears the search or closes the panel, and the user's Preferences
-/// shortcut opens Preferences.
+/// it, Option + Return copies it with its formatting dropped, Escape clears the
+/// search or closes the panel, and the user's Preferences shortcut opens
+/// Preferences.
 ///
 /// An NSEvent monitor rather than SwiftUI's onKeyPress because the text field
 /// would otherwise consume the arrows and Return first.
+///
+/// Deliberately knows nothing about the store: every key it answers to is
+/// reported as a closure, so what "copy" means stays a decision of the view.
 struct MenuKeyHandler: NSViewRepresentable {
     @Binding var query: String
     let suggestion: String?
     let preferencesCombo: KeyCombo
     let onMove: (Int) -> Void
     let onSubmit: () -> Void
+    /// Option + Return: the same entry, without its formatting.
+    let onSubmitPlainText: () -> Void
     let onEscape: () -> Void
     let onPreferences: () -> Void
 
     func makeNSView(context: Context) -> NSView {
-        let view = PanelHostView(frame: .zero)
+        let view = NSView(frame: .zero)
         context.coordinator.start(view: view)
         update(context.coordinator)
         return view
@@ -284,6 +321,7 @@ struct MenuKeyHandler: NSViewRepresentable {
         coordinator.preferencesCombo = preferencesCombo
         coordinator.onMove = onMove
         coordinator.onSubmit = onSubmit
+        coordinator.onSubmitPlainText = onSubmitPlainText
         coordinator.onEscape = onEscape
         coordinator.onPreferences = onPreferences
     }
@@ -298,6 +336,7 @@ struct MenuKeyHandler: NSViewRepresentable {
         var preferencesCombo: KeyCombo = .defaultPreferences
         var onMove: (Int) -> Void = { _ in }
         var onSubmit: () -> Void = {}
+        var onSubmitPlainText: () -> Void = {}
         var onEscape: () -> Void = {}
         var onPreferences: () -> Void = {}
 
@@ -320,7 +359,16 @@ struct MenuKeyHandler: NSViewRepresentable {
                     return nil
                 case 126: onMove(-1); return nil
                 case 125: onMove(1); return nil
-                case 36, 76: onSubmit(); return nil
+                case 36, 76:
+                    // Only Option distinguishes the two. Every other modifier
+                    // still means plain Return, because a user holding Shift or
+                    // Control while choosing an entry meant to choose it, and
+                    // silently doing nothing would be the worse answer.
+                    let option = event.modifierFlags
+                        .intersection(.deviceIndependentFlagsMask)
+                        .contains(.option)
+                    if option { onSubmitPlainText() } else { onSubmit() }
+                    return nil
                 case 53: onEscape(); return nil
                 default: return event
                 }

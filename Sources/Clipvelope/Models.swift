@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // MARK: - Models
@@ -15,6 +16,21 @@ enum ClipboardContent: Codable, Equatable {
     case image(ImageInfo)
     case files([FileRef])
 
+    /// SHA-256 of a payload, hex-encoded lowercase.
+    ///
+    /// The index describes payloads it does not contain, and the description --
+    /// size, byte count, type -- is not the picture. Two different screenshots of
+    /// the same window compare equal on those fields alone, and the second one is
+    /// then silently discarded as a re-copy of the first. This digest is what
+    /// makes the difference representable, so it is computed once where the bytes
+    /// are already in hand and stored alongside them.
+    ///
+    /// Not a security boundary and not a secret: a digest of the payload is no
+    /// more revealing than the payload, which sits next to it in the same vault.
+    static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     /// Formatted text: a styled paste kept intact rather than flattened.
     ///
     /// The plain rendering lives here in the index, because search, autocomplete
@@ -29,11 +45,16 @@ enum ClipboardContent: Codable, Equatable {
         var byteCount: Int
         /// UTI of the stored payload: "public.rtf" or "public.html".
         var typeIdentifier: String
+        /// SHA-256 of the RTF or HTML bytes. Nil for entries written before this
+        /// field existed; see `==` for what that means.
+        var contentHash: String?
 
-        init(plainText: String, byteCount: Int, typeIdentifier: String) {
+        init(plainText: String, byteCount: Int, typeIdentifier: String,
+             contentHash: String? = nil) {
             self.plainText = plainText
             self.byteCount = byteCount
             self.typeIdentifier = typeIdentifier
+            self.contentHash = contentHash
         }
 
         // Decoded with the count clamped: this can arrive in a portable backup
@@ -44,6 +65,22 @@ enum ClipboardContent: Codable, Equatable {
             plainText = try c.decode(String.self, forKey: .plainText)
             byteCount = min(max(0, try c.decode(Int.self, forKey: .byteCount)), Self.maxBytes)
             typeIdentifier = try c.decode(String.self, forKey: .typeIdentifier)
+            // A vault written by 0.1.0 has no such key, and failing to decode it
+            // would be indistinguishable from corruption.
+            contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
+        }
+
+        /// Two formatted pastes are the same paste only if their bytes are.
+        ///
+        /// See `ImageInfo.==` for the whole argument; it applies here verbatim,
+        /// weakened only by `plainText` already carrying some of the payload.
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            guard lhs.plainText == rhs.plainText,
+                  lhs.byteCount == rhs.byteCount,
+                  lhs.typeIdentifier == rhs.typeIdentifier
+            else { return false }
+            guard let left = lhs.contentHash, let right = rhs.contentHash else { return true }
+            return left == right
         }
     }
 
@@ -62,12 +99,17 @@ enum ClipboardContent: Codable, Equatable {
         var byteCount: Int
         /// UTI of the stored payload, e.g. "public.png".
         var typeIdentifier: String
+        /// SHA-256 of the image bytes. Nil for entries written before this field
+        /// existed; see `==` for what that means.
+        var contentHash: String?
 
-        init(pixelWidth: Int, pixelHeight: Int, byteCount: Int, typeIdentifier: String) {
+        init(pixelWidth: Int, pixelHeight: Int, byteCount: Int, typeIdentifier: String,
+             contentHash: String? = nil) {
             self.pixelWidth = pixelWidth
             self.pixelHeight = pixelHeight
             self.byteCount = byteCount
             self.typeIdentifier = typeIdentifier
+            self.contentHash = contentHash
         }
 
         init(from decoder: Decoder) throws {
@@ -76,6 +118,44 @@ enum ClipboardContent: Codable, Equatable {
             pixelHeight = max(0, try c.decode(Int.self, forKey: .pixelHeight))
             byteCount = min(max(0, try c.decode(Int.self, forKey: .byteCount)), Self.maxBytes)
             typeIdentifier = try c.decode(String.self, forKey: .typeIdentifier)
+            // A vault written by 0.1.0 has no such key. Every field added after
+            // release is optional with a default, because a decode failure is
+            // indistinguishable from corruption and the recovery path for
+            // corruption is destructive.
+            contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
+        }
+
+        /// Two pictures are the same picture only if their bytes are.
+        ///
+        /// Written by hand rather than synthesised, because the rule is
+        /// deliberately asymmetric in the hash:
+        ///
+        /// - both sides carry a hash: equal only if the hashes agree. Width,
+        ///   height, byte count and type say nothing about the pixels, so two
+        ///   different screenshots of the same window used to compare equal and
+        ///   the newer one was silently dropped as a re-copy of the older.
+        /// - either side is missing a hash: compare exactly the fields 0.1.0
+        ///   compared, and nothing more. Entries already in a vault have no hash
+        ///   and are never given one -- doing that would mean decrypting every
+        ///   payload file at launch, which is the cost the per-item payload
+        ///   layout exists to avoid. Without this fallback, re-copying a picture
+        ///   that is already in the history would append a second entry for it
+        ///   after the upgrade, for every image the user had.
+        ///
+        /// The fallback makes `==` intransitive between a hashless entry and two
+        /// differently-hashed ones. That is accepted knowingly: the only caller
+        /// is the linear "have we already got this?" scan in `HistoryPolicy`,
+        /// which asks the question pairwise and never relies on transitivity, and
+        /// neither this type nor its containers are `Hashable` or used as a set
+        /// element or dictionary key.
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            guard lhs.pixelWidth == rhs.pixelWidth,
+                  lhs.pixelHeight == rhs.pixelHeight,
+                  lhs.byteCount == rhs.byteCount,
+                  lhs.typeIdentifier == rhs.typeIdentifier
+            else { return false }
+            guard let left = lhs.contentHash, let right = rhs.contentHash else { return true }
+            return left == right
         }
     }
 
@@ -267,6 +347,11 @@ struct AppState: Codable {
     var captureSuspended: Bool = false
     var openHotkey: KeyCombo = .defaultOpen
     var preferencesHotkey: KeyCombo = .defaultPreferences
+    /// Whether choosing an entry also presses Command + V for the user. Off
+    /// until they say otherwise: it is the one feature that needs Accessibility
+    /// access, and granting that to a clipboard manager is a decision the user
+    /// makes, never one a default or a file makes for them.
+    var pasteDirectly: Bool = false
 
     static let empty = AppState(
         items: [], bindings: [], folders: [],
@@ -295,6 +380,10 @@ extension AppState {
         openHotkey = try c.decodeIfPresent(KeyCombo.self, forKey: .openHotkey) ?? .defaultOpen
         preferencesHotkey = try c.decodeIfPresent(KeyCombo.self, forKey: .preferencesHotkey)
             ?? .defaultPreferences
+        // A vault written by 0.1.0 has no such key, and its absence has to mean
+        // off -- anything else would turn on keystroke synthesis for everyone
+        // who upgrades, which is the opposite of a choice.
+        pasteDirectly = try c.decodeIfPresent(Bool.self, forKey: .pasteDirectly) ?? false
     }
 }
 

@@ -107,10 +107,23 @@ struct PanelModel: Equatable {
         case close
     }
 
+    /// A query of nothing but whitespace is not a search: it narrows nothing,
+    /// and the panel should not talk about "matches" when the user has not
+    /// asked for any.
+    var isSearching: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Folded search. `range(of:options:)` compares in place, so the cost is the
+    /// length of the query rather than a fresh lowercased copy of every stored
+    /// string -- the history holds up to 200 entries of up to 2 MB each, and this
+    /// runs on the main thread on every keystroke. Diacritics are folded too, so
+    /// `resume` finds `résumé`.
     func matches(in items: [ClipboardItem]) -> [ClipboardItem] {
-        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return items }
-        let q = query.lowercased()
-        return items.filter { $0.searchText.lowercased().contains(q) }
+        guard isSearching else { return items }
+        return items.filter {
+            $0.searchText.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
     }
 
     /// Rows in the order they are drawn: pinned first, then by time section.
@@ -128,6 +141,31 @@ struct PanelModel: Equatable {
         groups(in: items, now: now, calendar: calendar).flatMap(\.items)
     }
 
+    /// Matching entries the panel is not drawing, because the list stops at
+    /// `maxVisibleRows`. Zero when everything that matches is on screen.
+    ///
+    /// Counted against `matches(in:)` rather than the whole history: while a
+    /// search is running, what is missing from the list is hidden *matches*.
+    func hiddenCount(in items: [ClipboardItem]) -> Int {
+        max(matches(in: items).count - Self.maxVisibleRows, 0)
+    }
+
+    /// The line drawn under the last row when the list is cut short, or nil
+    /// when nothing is hidden.
+    ///
+    /// It carries the two counts because a 50-item history and a 173-item
+    /// history showing 50 look identical otherwise, and the second one reads
+    /// as history that was thrown away.
+    func overflowNotice(in items: [ClipboardItem]) -> String? {
+        let total = matches(in: items).count
+        guard total > Self.maxVisibleRows else { return nil }
+        guard isSearching else {
+            return "\(Self.maxVisibleRows) of \(total) shown. Type to search the rest."
+        }
+        let noun = total == 1 ? "match" : "matches"
+        return "\(Self.maxVisibleRows) of \(total) \(noun) shown. Keep typing to narrow it."
+    }
+
     func selectedItem(in items: [ClipboardItem],
                       now: Date = Date(),
                       calendar: Calendar = .current) -> ClipboardItem? {
@@ -137,12 +175,18 @@ struct PanelModel: Equatable {
 
     /// Completes the search from the newest text entry that starts with it.
     /// Only text entries: an image cannot be typed into a search field.
+    ///
+    /// Only as many characters as the query has are ever compared; a stored
+    /// entry is never folded in full to test a three-letter prefix. `prefix(_:)`
+    /// and `count` both measure Characters, so they agree on what "as long as
+    /// the query" means, and a candidate shorter than the query simply fails to
+    /// compare equal.
     func suggestion(in items: [ClipboardItem]) -> String? {
         guard !query.isEmpty else { return nil }
-        let q = query.lowercased()
         return items.first { item in
             guard case .text(let value) = item.content else { return false }
-            return value.lowercased().hasPrefix(q)
+            return value.prefix(query.count)
+                .compare(query, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
         }?.searchText
     }
 

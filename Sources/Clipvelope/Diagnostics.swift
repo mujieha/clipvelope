@@ -24,6 +24,11 @@ enum Diagnostics {
         print("bundle path:      \(bundle.bundlePath)")
         print("bundle id:        \(bundle.bundleIdentifier ?? "none")")
         print("login item:       \(describe(SMAppService.mainApp.status))")
+        // The menu bar item is the only way into this app, and the code that
+        // finds it can fail without anyone noticing. Reported here even though
+        // this process can only ever answer "not checked", because saying so is
+        // the truth, and the line is where anyone would look for it.
+        print("menu bar item:    \(PanelOpener.availability.summary)")
 
         if KeychainKeyStore.usesDataProtectionKeychain {
             print("key storage:      data protection keychain (private to this app)")
@@ -42,11 +47,9 @@ enum Diagnostics {
     }
 
     private static func signalRunningInstance(_ name: Notification.Name) -> Never {
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.mujieha.Clipvelope"
-        let me = ProcessInfo.processInfo.processIdentifier
-        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-            .filter { $0.processIdentifier != me }
-        guard !running.isEmpty else {
+        // Same question the single-instance guard asks, and the same answer:
+        // every copy in this login session except this one. See SingleInstance.
+        guard !SingleInstance.otherInstances().isEmpty else {
             print("Clipvelope is not running.")
             exit(1)
         }

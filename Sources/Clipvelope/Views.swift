@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 /// behind whatever the user is looking at -- it is on screen, just invisible in
 /// practice. `orderFrontRegardless` raises a window without activation, which is
 /// the only thing that works for an agent app.
-private func bringSettingsWindowForward() {
+func bringSettingsWindowForward() {
     NSApp.activate(ignoringOtherApps: true)
     for window in NSApp.windows where window.canBecomeMain {
         // Otherwise macOS restores the window at the next launch, and a menu bar
@@ -23,7 +23,10 @@ struct PreferencesButton: View {
     var body: some View {
         SettingsLink {
             HStack(spacing: 4) {
+                // The word beside it already says what this is; announcing the
+                // gear as well would read the control twice.
                 Image(systemName: "gearshape")
+                    .accessibilityHidden(true)
                 Text("Preferences")
             }
             .font(.system(size: 11))
@@ -39,45 +42,6 @@ struct PreferencesButton: View {
                 bringSettingsWindowForward()
             }
         })
-    }
-}
-
-/// The menu bar icon. It is also the one view that exists for as long as the
-/// app runs, which makes it the place to answer `Clipvelope --preferences`: the
-/// Settings scene opens through SwiftUI's own action, and that action only
-/// exists inside a view's environment.
-struct StatusItemLabel: View {
-    @Environment(\.openSettings) private var openSettings
-
-    /// The sealed envelope from the app icon, as a template so macOS recolours
-    /// it for light and dark menu bars. A bare `swift build` binary has no
-    /// bundle resources; it falls back to a system symbol.
-    private static let icon: NSImage? = {
-        guard let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "pdf"),
-              let image = NSImage(contentsOf: url) else { return nil }
-        image.isTemplate = true
-        image.size = NSSize(width: 18, height: 18)
-        return image
-    }()
-
-    var body: some View {
-        Label {
-            Text("Clipvelope")
-        } icon: {
-            if let icon = Self.icon {
-                Image(nsImage: icon)
-            } else {
-                Image(systemName: "envelope.fill")
-            }
-        }
-            .onReceive(DistributedNotificationCenter.default()
-                .publisher(for: RemoteControl.preferencesNotification)
-                .filter { RemoteControl.isAuthentic($0) }) { _ in
-                openSettings()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    bringSettingsWindowForward()
-                }
-            }
     }
 }
 
@@ -100,13 +64,23 @@ struct HotkeyRecorder: View {
                 recording ? stop() : start()
             }
             .help(recording ? "Escape cancels." : "Click, then press the keys you want.")
+            // While recording, the only signal that the app is listening is the
+            // button's caption changing. Spoken, that has to say it outright:
+            // a user who cannot see the change would otherwise sit at a button
+            // that appears to have done nothing.
+            .accessibilityLabel(recording ? "Listening for the new shortcut"
+                                          : "Shortcut, \(combo.displayName)")
+            .accessibilityHint(recording ? "Press the keys you want, or Escape to cancel."
+                                         : "Activate, then press the keys you want.")
             if recording {
                 Button("Cancel") { stop() }
                     .buttonStyle(.borderless)
+                    .accessibilityHint("Stops listening and keeps \(combo.displayName).")
             } else if combo != defaultCombo {
                 Button("Reset") { onChange(defaultCombo) }
                     .buttonStyle(.borderless)
                     .help("Back to \(defaultCombo.displayName)")
+                    .accessibilityHint("Back to \(defaultCombo.displayName).")
             }
         }
         .onDisappear { if recording { stop() } }
@@ -163,6 +137,7 @@ struct StorageFailureBanner: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
+                    .accessibilityHidden(true)
                 Text(store.writesSuspended ? "Saving paused" : "Could not save").bold()
             }
             .font(.system(size: 12))
@@ -296,7 +271,11 @@ struct HistoryRow: View {
         }
     }
 
-    private var tooltip: String {
+    /// Everything about the entry that the preview itself does not show: which
+    /// flavour of text it is, where it came from, and when. The tooltip and the
+    /// spoken label are both built from this, so the mouse and VoiceOver can
+    /// never be told two different stories about the same row.
+    private var contextLines: [String] {
         var lines: [String] = []
         if case .richText(let info) = item.content {
             lines.append(info.typeIdentifier == "public.html" ? "Formatted text (HTML)"
@@ -306,7 +285,46 @@ struct HistoryRow: View {
             lines.append("Copied from \(AppNameResolver.displayName(forBundleID: source))")
         }
         lines.append(item.createdAt.formatted(date: .abbreviated, time: .shortened))
-        return lines.joined(separator: "\n")
+        return lines
+    }
+
+    private var tooltip: String {
+        contextLines.joined(separator: "\n")
+    }
+
+    /// What the row holds, said out loud. The visible row leans on a thumbnail,
+    /// a symbol and two type sizes to tell text from an image from a set of
+    /// files; none of that survives being spoken, so the words have to carry it.
+    private var contentDescription: String {
+        switch item.content {
+        case .text(let value):
+            return spokenText(PreviewText.summary(of: value))
+
+        case .richText(let info):
+            return spokenText(PreviewText.summary(of: info.plainText))
+
+        case .image(let info):
+            return "Image, \(info.pixelWidth) by \(info.pixelHeight)"
+
+        case .files(let refs):
+            let names = refs.map(\.name).joined(separator: ", ")
+            return refs.count == 1 ? "File, \(names)" : "\(refs.count) files, \(names)"
+        }
+    }
+
+    private func spokenText(_ summary: PreviewText.Summary) -> String {
+        let body = summary.text.isEmpty ? "Whitespace only" : summary.text
+        return summary.lineCount > 1 ? "\(body), \(summary.lineCount) lines" : body
+    }
+
+    private var accessibilityDescription: String {
+        ([contentDescription] + contextLines).joined(separator: ", ")
+    }
+
+    private var accessibilityHintText: String {
+        index < 9 ? "Return copies this entry. Command \(index + 1) copies it from anywhere "
+                    + "in the panel."
+                  : "Return copies this entry."
     }
 
     private var copyButton: some View {
@@ -318,6 +336,8 @@ struct HistoryRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityDescription)
+        .accessibilityHint(accessibilityHintText)
         .onAppear {
             // Thumbnails are read from the payload file on demand and cached by
             // the store, so the index stays small.
@@ -328,23 +348,49 @@ struct HistoryRow: View {
     @ViewBuilder
     private var trailing: some View {
         if isHovering {
-            Button(action: { store.togglePin(item) }) {
+            // The haptic calls are here rather than in the store on purpose.
+            // Pinning and deleting also happen from paths with no pointer
+            // anywhere near them -- an import, an eviction when the history
+            // reaches its cap, Delete Everything, and the removal of a row
+            // whose image payload turned out to be missing -- and a tap for
+            // those would be unfelt at best and wrong at worst. These two
+            // buttons exist only while the pointer is over the row, which is
+            // the condition a Force Touch trackpad requires before it will
+            // perform feedback at all. See Haptics.swift.
+            Button(action: {
+                Haptics.rowPinned()
+                store.togglePin(item)
+            }) {
                 Image(systemName: item.isPinned ? "pin.slash" : "pin")
             }
             .buttonStyle(.plain)
             .foregroundColor(.secondary)
             .help(item.isPinned ? "Unpin" : "Pin")
+            .accessibilityLabel(item.isPinned ? "Unpin this item" : "Pin this item")
 
-            Button(action: { store.remove(item) }) {
+            Button(action: {
+                Haptics.rowDeleted()
+                store.remove(item)
+            }) {
                 Image(systemName: "trash")
             }
             .buttonStyle(.plain)
             .foregroundColor(.secondary)
             .help("Delete")
+            .accessibilityLabel("Delete this item")
         } else if isSelected {
+            // Stays "↩" while Option is held, even though Option + Return does
+            // something else. Swapping it would take an app-wide flagsChanged
+            // monitor running the whole time the panel is open, which is a lot
+            // of machinery for a badge; the General pane lists the key instead.
+            // The badges are a hint drawn next to a row that already says what
+            // it is and which key copies it; announced on their own they are a
+            // stray "return" with nothing attached to it.
             KeyBadge(text: "↩")
+                .accessibilityHidden(true)
         } else if index < 9 {
             KeyBadge(text: "⌘\(index + 1)")
+                .accessibilityHidden(true)
         }
     }
 
@@ -393,6 +439,25 @@ private struct SectionLabel: View {
     }
 }
 
+/// The last line of the list when the history is longer than the panel draws.
+/// Deliberately not a `HistoryRow`: it is not selectable, not copyable, and
+/// takes no ⌘-number, because it is a statement about the list rather than a
+/// part of it.
+private struct OverflowLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 3)
+    }
+}
+
 // MARK: - State strip
 
 /// One line that says what the vault is doing right now. It replaces a stack
@@ -413,12 +478,33 @@ struct StateStrip: View {
     var body: some View {
         let content = content
         HStack(spacing: 6) {
+            // The symbol and the orange tint restate what the sentence beside
+            // them already says. Hidden, the strip announces as that sentence
+            // and nothing else.
             Image(systemName: content.symbol)
                 .font(.system(size: 10))
+                .accessibilityHidden(true)
+            // Two lines and a tooltip, rather than one or the other.
+            //
+            // The notice duration was raised from six seconds to eight with the
+            // stated reason that every one of these messages is two sentences
+            // and ends in an instruction -- and on one line at 11pt in a 380pt
+            // panel the second sentence, which is the instruction, could not be
+            // read at all. Two lines carry all of the shorter messages and most
+            // of the longest; `.help` carries the rest, and is the only part
+            // that cannot truncate no matter how long a future message runs.
+            // `fixedSize` vertically so the second line is given room instead of
+            // being compressed back out of existence, and the width comes from a
+            // `frame` rather than from a trailing `Spacer`: a spacer and a
+            // wrapping text both want the slack, and splitting it between them
+            // is how a two-line label ends up truncated on one line anyway. The
+            // leading alignment is what the spacer was there for.
             Text(content.text)
                 .font(.system(size: 11))
-                .lineLimit(1)
-            Spacer(minLength: 0)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(content.text)
         }
         .foregroundColor(content.degraded ? .orange : .secondary)
         .padding(.horizontal, 12)
@@ -426,6 +512,12 @@ struct StateStrip: View {
         .frame(maxWidth: .infinity)
         .background(content.degraded ? Color.orange.opacity(0.12)
                                      : Color(NSColor.controlBackgroundColor))
+        // So the store knows whether this strip is on screen to carry a notice,
+        // and can put one below the menu bar instead when it is not. See
+        // `ClipboardStore.noticeNeedsHUD`, which deliberately does not trust
+        // this signal on its own.
+        .onAppear { store.stateStripAppeared() }
+        .onDisappear { store.stateStripDisappeared() }
     }
 }
 
@@ -440,13 +532,20 @@ struct ClipboardMenuView: View {
     @FocusState private var searchFocused: Bool
     @Environment(\.openSettings) private var openSettings
 
-    private func closeMenuBarWindow() {
+    /// The panel is the app's key window whenever it is open -- that is what
+    /// lets the search field take a keystroke -- so closing the key window
+    /// closes the panel. `ClipboardStore.closePanelThenPaste` does the same
+    /// thing by the same route, and both are measured against `HistoryPanel`.
+    private func closePanelWindow() {
         NSApplication.shared.keyWindow?.close()
     }
 
     private var groups: [HistorySection.Group] { panel.groups(in: store.items) }
     private var visibleItems: [ClipboardItem] { groups.flatMap(\.items) }
     private var autocompleteSuggestion: String? { panel.suggestion(in: store.items) }
+    /// Nil unless the list stops short of what matches. It is drawn after the
+    /// last row and is not one of `visibleItems`, so it takes no selection.
+    private var overflowNotice: String? { panel.overflowNotice(in: store.items) }
 
     private var queryBinding: Binding<String> {
         Binding(get: { panel.query }, set: { panel.setQuery($0) })
@@ -458,14 +557,25 @@ struct ClipboardMenuView: View {
         panel.move(delta, rowCount: visibleItems.count)
     }
 
+    /// Return, and the row button: copy the entry and -- if the user has turned
+    /// Paste Directly on -- put it back where they were typing.
+    ///
+    /// `copyAndMaybePaste` closes the panel itself, and has to, because the
+    /// paste may only be posted once the panel has given the keyboard back.
+    /// Closing it here as well would close it twice.
     private func copySelected() {
         guard let item = panel.selectedItem(in: store.items) else { return }
-        store.copyToPasteboard(item)
-        closeMenuBarWindow()
+        store.copyAndMaybePaste(item)
+    }
+
+    /// Option + Return: the same, with any formatting dropped.
+    private func copySelectedAsPlainText() {
+        guard let item = panel.selectedItem(in: store.items) else { return }
+        store.copyPlainTextAndMaybePaste(item)
     }
 
     private func escape() {
-        if panel.escape() == .close { closeMenuBarWindow() }
+        if panel.escape() == .close { closePanelWindow() }
     }
 
     private func showPreferences() {
@@ -475,11 +585,11 @@ struct ClipboardMenuView: View {
         }
     }
 
-    /// An AppKit alert rather than SwiftUI's `.alert`: the popover closes the
+    /// An AppKit alert rather than SwiftUI's `.alert`: the panel closes the
     /// moment anything else becomes key, which took the SwiftUI alert down with
     /// it before either button could act. This closes the panel first, then asks.
     private func confirmClear() {
-        closeMenuBarWindow()
+        closePanelWindow()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             let alert = NSAlert()
             alert.alertStyle = .warning
@@ -503,12 +613,16 @@ struct ClipboardMenuView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(.secondary)
                 .font(.system(size: 14))
+                .accessibilityHidden(true)
             ZStack(alignment: .leading) {
                 if let suggestion = autocompleteSuggestion {
+                    // Drawn behind what is being typed, as a ghost. Read aloud
+                    // as its own line it would sound like a second search field.
                     Text(suggestion)
                         .foregroundColor(.secondary)
                         .opacity(0.4)
                         .lineLimit(1)
+                        .accessibilityHidden(true)
                 }
                 TextField("Search clipboard", text: queryBinding)
                     .textFieldStyle(.plain)
@@ -550,13 +664,17 @@ struct ClipboardMenuView: View {
                 SectionLabel(title: group.section.title)
                 ForEach(group.items) { item in
                     let index = position[item.id] ?? 0
+                    // Both the click and the ⌘-number come through here, and
+                    // `copyAndMaybePaste` closes the panel itself.
                     HistoryRow(item: item, index: index, isSelected: index == panel.selection,
                                store: store) {
-                        store.copyToPasteboard(item)
-                        closeMenuBarWindow()
+                        store.copyAndMaybePaste(item)
                     }
                     .id(item.id)
                 }
+            }
+            if let notice = overflowNotice {
+                OverflowLabel(text: notice)
             }
             Color.clear.frame(height: 6)
         }
@@ -569,12 +687,16 @@ struct ClipboardMenuView: View {
             Button(action: { store.setCaptureSuspended(!store.captureSuspended) }) {
                 HStack(spacing: 4) {
                     Image(systemName: store.captureSuspended ? "play.circle" : "pause.circle")
+                        .accessibilityHidden(true)
                     Text(store.captureSuspended ? "Resume" : "Pause")
                 }
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityHint(store.captureSuspended
+                               ? "Starts recording what you copy again."
+                               : "Stops recording what you copy. The history is kept.")
 
             Spacer()
 
@@ -617,8 +739,8 @@ struct ClipboardMenuView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         listBody
                     }
-                    // A ScrollView reports an ideal height of zero, and the
-                    // MenuBarExtra window sizes itself to fit its content, so a bare
+                    // A ScrollView reports an ideal height of zero, and the panel's
+                    // window sizes itself to fit this content, so a bare
                     // `maxHeight` collapsed the list to nothing. `fixedSize` is the
                     // wrong cure: it makes the ScrollView ignore the size its parent
                     // offers, so rows overflow and paint over the search field.
@@ -628,7 +750,7 @@ struct ClipboardMenuView: View {
                     }
                 }
                 .frame(height: min(max(contentHeight, 80), 420))
-                // Without this the list shows the popover's vibrancy material, so the
+                // Without this the list shows the window's vibrancy material, so the
                 // desktop bleeds through behind the rows while the search field and
                 // footer sit on a solid colour. Paint it to match them.
                 .background(Color(NSColor.controlBackgroundColor))
@@ -641,13 +763,15 @@ struct ClipboardMenuView: View {
             Divider()
             StateStrip(store: store)
             Divider()
+            UpdateReminderLine()
             footer
         }
         .frame(width: 380)
         .onAppear {
             panel = PanelModel()
-            // The popover window is created fresh each time the menu opens, so it
-            // needs the appearance applied then, not only when the theme changes.
+            // This view is built fresh each time the panel opens -- see
+            // MenuBarController.show() -- so it needs the appearance applied
+            // then, not only when the theme changes.
             AppearanceController.apply(store.themeMode)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 searchFocused = true
@@ -655,8 +779,67 @@ struct ClipboardMenuView: View {
         }
         .background(MenuKeyHandler(query: queryBinding, suggestion: autocompleteSuggestion,
                                    preferencesCombo: store.preferencesHotkey,
-                                   onMove: move, onSubmit: copySelected, onEscape: escape,
+                                   onMove: move, onSubmit: copySelected,
+                                   onSubmitPlainText: copySelectedAsPlainText,
+                                   onEscape: escape,
                                    onPreferences: showPreferences))
+    }
+}
+
+// MARK: - The update reminder
+
+/// One line above the footer, and only while a background update check has
+/// found a new version.
+///
+/// The menu bar icon's dot is the persistent signal; this is what makes it
+/// actionable. Someone who notices the dot opens the panel to find out what it
+/// meant, and without this the only route from there to the waiting update is
+/// Preferences — two windows away from the icon that was trying to say
+/// something. A reminder, not a feature: one line, and it is gone the moment
+/// the update is.
+///
+/// It draws nothing in a build without an updater. `bringUpdateForward` is only
+/// ever set by `UpdaterController`, so in a build with no Sparkle it stays nil
+/// and this returns an empty view — the same rule the rest of `Updater.swift`
+/// follows.
+private struct UpdateReminderLine: View {
+    @ObservedObject private var reminder = UpdateReminder.shared
+
+    var body: some View {
+        if reminder.isWaiting, let bringUpdateForward = reminder.bringUpdateForward {
+            Button(action: bringUpdateForward) {
+                HStack(spacing: 5) {
+                    // Not an error icon and not a badge count: a new version is
+                    // news, not a fault. The same judgement as the menu bar dot.
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(.tint)
+                        .accessibilityHidden(true)
+                    Text("A new version is ready")
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Text("Show")
+                        .foregroundColor(.secondary)
+                }
+                .font(.system(size: 11))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                // The whole strip is the target, not just the words.
+                .contentShape(Rectangle())
+                // Every row of this panel paints its own opaque background, and
+                // a row that does not is not merely plain -- the panel's window
+                // is vibrant, so whatever window happens to be behind it shows
+                // through. This row shipped without one and the result was a
+                // band that changed shape as other windows moved, ending
+                // wherever the window behind it ended. The same trap is
+                // documented above the list, which needs a background for the
+                // same reason; match what StateStrip and the footer do.
+                .frame(maxWidth: .infinity)
+                .background(Color(NSColor.controlBackgroundColor))
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the update window, in front, so you can install it.")
+            Divider()
+        }
     }
 }
 
@@ -759,6 +942,7 @@ private struct GeneralPane: View {
                 }
                 LabeledContent("Quick Slots", value: "Option + 1 to 9")
                 LabeledContent("Copy an item", value: "Up and Down, then Return")
+                LabeledContent("Copy it without formatting", value: "Option + Return")
                 LabeledContent("Copy one of the first nine", value: "Command + 1 to 9")
             } header: {
                 Text("Keyboard")
@@ -770,6 +954,10 @@ private struct GeneralPane: View {
             Section {
                 LabeledContent("Version", value: Self.versionSummary)
                 if updater.isAvailable {
+                    Toggle("Check for updates automatically", isOn: Binding(
+                        get: { updater.automaticallyChecksForUpdates },
+                        set: { updater.setAutomaticallyChecksForUpdates($0) }
+                    ))
                     Button("Check for Updates…") { updater.checkForUpdates() }
                         .disabled(!updater.canCheckForUpdates)
                     if let notices = Bundle.main.url(forResource: "THIRD-PARTY-LICENSES",
@@ -781,10 +969,20 @@ private struct GeneralPane: View {
                 Text("About")
             } footer: {
                 if updater.isAvailable {
-                    Text("Clipvelope checks once a day and tells you when there is a new "
-                         + "version. Updates are signed; one that is not signed by this "
-                         + "developer is refused. Updates are delivered by Sparkle, which is "
-                         + "MIT licensed.")
+                    // The first sentence has to follow the toggle: with checking
+                    // off, saying it happens once a day would be a lie about the
+                    // one network call the app makes.
+                    if updater.automaticallyChecksForUpdates {
+                        Text("Clipvelope checks once a day and tells you when there is a new "
+                             + "version. Updates are signed; one that is not signed by this "
+                             + "developer is refused. Updates are delivered by Sparkle, which "
+                             + "is MIT licensed.")
+                    } else {
+                        Text("Clipvelope does not check on its own, and contacts nothing until "
+                             + "you press Check for Updates. Updates are signed; one that is "
+                             + "not signed by this developer is refused. Updates are delivered "
+                             + "by Sparkle, which is MIT licensed.")
+                    }
                 } else {
                     Text("This build does not check for updates.")
                 }
@@ -797,6 +995,31 @@ private struct GeneralPane: View {
 private struct PrivacyPane: View {
     @ObservedObject var store: ClipboardStore
     @State private var confirmSensitiveCapture = false
+    @State private var confirmDirectPaste = false
+    /// Whether macOS will let the app post a keystroke, as of a moment ago.
+    @State private var pasteIsTrusted = PasteService.isTrusted
+    @State private var trustTimer: Timer?
+
+    /// How often the permission is re-read while this pane is on screen.
+    ///
+    /// `AXIsProcessTrusted()` answers from a cache the system updates for us,
+    /// and nothing tells an app when the switch is thrown, so polling is the
+    /// only way to notice. It has to be noticed: the user grants this in System
+    /// Settings with Preferences still open, and a pane still saying "not
+    /// allowed" afterwards reads as the feature being broken. A second and a
+    /// half is below what anyone reads as a delay and far above what costs
+    /// anything.
+    private static let trustPollInterval: TimeInterval = 1.5
+
+    /// System Settings → Privacy & Security → Accessibility.
+    ///
+    /// Offered as well as the prompt because macOS shows its own prompt only
+    /// once per app: after the first time, the button that "asks" does nothing
+    /// visible, and this is the only way back. Verified on macOS 26 -- it opens
+    /// the list headed "Allow the applications below to control your computer",
+    /// not the unrelated Accessibility pane of the same name.
+    private static let accessibilitySettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
 
     private func chooseAppToIgnore() {
         let panel = NSOpenPanel()
@@ -854,6 +1077,72 @@ private struct PrivacyPane: View {
             }
 
             Section {
+                Toggle("Paste directly into the app you were using", isOn: Binding(
+                    get: { store.pasteDirectly },
+                    set: { wantsPaste in
+                        if wantsPaste {
+                            confirmDirectPaste = true
+                        } else {
+                            store.setPasteDirectly(false)
+                        }
+                    }
+                ))
+                .accessibilityHint("Needs Accessibility permission to press Command V for "
+                                   + "you. Without it, choosing an entry only copies it.")
+                // Three states, not two. A toggle sitting on while the app
+                // cannot actually paste would look exactly like one that works,
+                // and the user would blame the paste rather than the permission.
+                if store.pasteDirectly {
+                    if pasteIsTrusted {
+                        // Which of the three states this is, is carried visually
+                        // by a shield against a warning triangle and by plain
+                        // text against orange. Spoken, the icon is gone and the
+                        // colour with it, so the state is named in the first
+                        // words instead: "granted" here, "not granted" below,
+                        // and off, where neither line is drawn and the toggle
+                        // itself announces as off.
+                        Label("Clipvelope is allowed to paste for you. Choosing an entry puts "
+                              + "it back where you were typing.",
+                              systemImage: "checkmark.shield.fill")
+                            .accessibilityLabel("Accessibility permission granted. Clipvelope "
+                                                + "is allowed to paste for you. Choosing an "
+                                                + "entry puts it back where you were typing.")
+                    } else {
+                        Label("Clipvelope has not been allowed to paste for you, so choosing "
+                              + "an entry only copies it. Allow it under Accessibility and it "
+                              + "starts working — no restart needed.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                            .accessibilityLabel("Accessibility permission not granted. "
+                                                + "Clipvelope has not been allowed to paste "
+                                                + "for you, so choosing an entry only copies "
+                                                + "it. Allow it under Accessibility and it "
+                                                + "starts working — no restart needed.")
+                        HStack {
+                            Button("Ask for Accessibility Access…") { PasteService.requestTrust() }
+                                .accessibilityHint("Shows the system's own prompt. macOS "
+                                                   + "shows it only once per app, so after "
+                                                   + "the first time nothing may appear.")
+                            Button("Open System Settings…") {
+                                NSWorkspace.shared.open(Self.accessibilitySettingsURL)
+                            }
+                            .accessibilityHint("Opens Privacy and Security, Accessibility, "
+                                               + "where you can allow Clipvelope yourself.")
+                        }
+                    }
+                }
+            } header: {
+                Text("Direct paste")
+            } footer: {
+                Text("Clipvelope needs Accessibility access to press Command + V for you. That "
+                     + "permission lets any app holding it observe and control other "
+                     + "applications; Clipvelope uses it for nothing else, and for nothing at "
+                     + "all while this is off. Turning this off does not take the permission "
+                     + "away — you revoke it yourself in System Settings → Privacy & Security "
+                     + "→ Accessibility.")
+            }
+
+            Section {
                 if store.isKeyIsolated {
                     Label("The encryption key is private to Clipvelope.",
                           systemImage: "checkmark.shield.fill")
@@ -894,6 +1183,9 @@ private struct PrivacyPane: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Stop ignoring")
+                        // One trash icon per ignored app, all on one screen.
+                        .accessibilityLabel("Stop ignoring "
+                            + AppNameResolver.displayName(forBundleID: bundleID))
                     }
                 }
                 Button("Add App…", action: chooseAppToIgnore)
@@ -904,6 +1196,30 @@ private struct PrivacyPane: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            pasteIsTrusted = PasteService.isTrusted
+            trustTimer?.invalidate()
+            trustTimer = Timer.scheduledTimer(withTimeInterval: Self.trustPollInterval,
+                                              repeats: true) { _ in
+                // Assigning the same value is free: SwiftUI only redraws when
+                // the state actually changes.
+                pasteIsTrusted = PasteService.isTrusted
+            }
+        }
+        .onDisappear {
+            trustTimer?.invalidate()
+            trustTimer = nil
+        }
+        .alert("Let Clipvelope paste for you?", isPresented: $confirmDirectPaste) {
+            Button("Cancel", role: .cancel) { }
+            Button("Turn It On") { store.setPasteDirectly(true) }
+        } message: {
+            Text("To press Command + V for you, Clipvelope needs Accessibility access. "
+                 + "That permission lets any app holding it observe and control other "
+                 + "applications — Clipvelope uses it only to post that one keystroke, "
+                 + "and it is yours to revoke in System Settings at any time.\n\nUntil "
+                 + "you grant it, choosing an entry copies it as it always has.")
+        }
         .alert("Record passwords in your clipboard history?",
                isPresented: $confirmSensitiveCapture) {
             Button("Cancel", role: .cancel) { }
@@ -982,6 +1298,9 @@ private struct QuickSlotsPane: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Remove slot")
+                        // Up to nine of these on one screen; the slot's key is
+                        // what tells them apart, on screen and out loud.
+                        .accessibilityLabel("Remove slot Option \(index + 1)")
                     }
                 }
             }
@@ -1018,6 +1337,15 @@ private struct FoldersPane: View {
         store.persistState()
     }
 
+    /// A command in a few words: its label if it has one, otherwise the start
+    /// of what it holds. Only ever spoken, so it may be shorter than the field.
+    private static func describe(_ item: CommandItem) -> String {
+        let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { return title }
+        let content = PreviewText.summary(of: item.content, maxCharacters: 40).text
+        return content.isEmpty ? "without a label" : content
+    }
+
     private func updateItem(_ folderID: UUID, _ itemID: UUID,
                             _ change: (inout CommandItem) -> Void) {
         update(folderID) { folder in
@@ -1043,6 +1371,7 @@ private struct FoldersPane: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Delete folder")
+                        .accessibilityLabel("Delete folder \(folder.name)")
                     }
                 } header: {
                     Button {
@@ -1080,6 +1409,10 @@ private struct FoldersPane: View {
                             }
                             .buttonStyle(.borderless)
                             .help("Remove")
+                            // A trash icon per command, stacked down the pane.
+                            // "Remove" on its own would be the same word five
+                            // times over.
+                            .accessibilityLabel("Remove command \(Self.describe(item))")
                         }
                     }
                 }
@@ -1104,6 +1437,7 @@ private struct FoldersPane: View {
                                     .foregroundColor(.secondary)
                                 Image(systemName: "chevron.right")
                                     .foregroundColor(.secondary)
+                                    .accessibilityHidden(true)
                             }
                             .contentShape(Rectangle())
                         }

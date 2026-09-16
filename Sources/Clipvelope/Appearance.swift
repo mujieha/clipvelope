@@ -4,7 +4,7 @@ import AppKit
 ///
 /// Setting SwiftUI's `colorScheme` environment is not enough, and produced the
 /// half-themed window this replaces. That environment value recolours
-/// SwiftUI-drawn content, but window backgrounds, the menu bar popover's
+/// SwiftUI-drawn content, but window backgrounds, the history panel's
 /// material and the Settings window take their colours from the hosting
 /// NSWindow's `NSAppearance`. So the search field and footer -- which paint
 /// their own `Color(NSColor.controlBackgroundColor)` -- followed the theme,
@@ -19,8 +19,9 @@ enum AppearanceController {
         let appearance = appearance(for: mode)
         NSApplication.shared.appearance = appearance
 
-        // The MenuBarExtra popover is a system-owned panel that does not inherit
-        // the application appearance, so it has to be set on the window itself.
+        // Windows that already exist do not pick the application appearance up
+        // on their own, so it is set on each of them too -- the history panel
+        // included, which is created at launch and lives until the app quits.
         for window in NSApplication.shared.windows {
             window.appearance = appearance
         }

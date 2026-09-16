@@ -1,4 +1,4 @@
-.PHONY: build test app run clean icon check xcodeproj dmg notarize release appcast smoke
+.PHONY: build test app run clean icon check preflight xcodeproj dmg notarize release appcast smoke
 
 build:
 	swift build
@@ -7,9 +7,21 @@ test:
 	./scripts/test.sh
 
 # Everything CI checks that does not need a build.
+#
+# The appcast self-test belongs here rather than in `make appcast`: it proves the
+# URL rule and the rewrite against a synthetic feed, so it needs no signing key,
+# no Sparkle build and no disk image -- and the update channel is the one place
+# where a mistake reaches every installed copy. Without this the rule was only
+# ever exercised by hand.
 check:
 	./scripts/check-workflows.sh
 	plutil -lint Resources/Info.plist Resources/Clipvelope.entitlements
+	CLIPVELOPE_APPCAST_SELFTEST=1 ./scripts/make-appcast.sh
+
+# Read-only. Refuses a release whose version, changelog, build number or dist/
+# contents are wrong. Run it before `make release`.
+preflight:
+	./scripts/preflight.sh
 
 app:
 	./scripts/bundle.sh
@@ -33,8 +45,21 @@ icon: app
 dmg:
 	./scripts/make-dmg.sh
 
+# Rebuild the disk image around the app already sitting in dist/, without
+# rebuilding the app itself.
+#
+# This is the step that follows notarizing the app, and it cannot be `make dmg`:
+# that rebuilds, which throws away the notarization staple just applied and --
+# because it does not set CLIPVELOPE_SPARKLE -- drops the updater as well. The
+# result looks correct and is not, which is exactly the kind of release mistake
+# this project keeps finding after the fact.
+repack:
+	CLIPVELOPE_SPARKLE=1 SKIP_BUILD=yes ./scripts/make-dmg.sh
+
 # A build with the updater. Needs a real Apple identity: macOS will not load an
 # embedded framework into an ad-hoc signed process.
+#
+# The release recipe is: preflight, release, notarize, appcast.
 release:
 	CLIPVELOPE_SPARKLE=1 ./scripts/bundle.sh
 	CLIPVELOPE_SPARKLE=1 SKIP_BUILD=yes ./scripts/make-dmg.sh

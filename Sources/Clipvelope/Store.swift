@@ -40,6 +40,9 @@ final class ClipboardStore: ObservableObject {
     @Published var captureSuspended: Bool = false { didSet { syncMonitorPolicy() } }
     @Published private(set) var openHotkey: KeyCombo = .defaultOpen
     @Published private(set) var preferencesHotkey: KeyCombo = .defaultPreferences
+    /// Whether choosing an entry also presses Command + V. Off until the user
+    /// turns it on, and `disarming` keeps it that way through an import.
+    @Published var pasteDirectly: Bool = false
     /// False when another app owns the open-history combination, so Preferences
     /// can say so instead of leaving a shortcut that silently does nothing.
     @Published private(set) var openHotkeyRegistered = true
@@ -58,10 +61,15 @@ final class ClipboardStore: ObservableObject {
     /// Only for the auto-backup password. The encryption key comes from
     /// `storage.keyStore`, so the vault and its backups cannot diverge.
     private let autoBackupPasswordStore = KeychainKeyStore()
-    private let maxItems = 200
+    /// How many entries the live history holds, pins aside.
+    static let maxItems = 200
     /// A ceiling on what one untrusted backup may install, well above any vault
     /// this app produces and far below a file built to fill a disk.
     static let maxImportedItems = 1_000
+    /// And a ceiling on how many of those may stay pinned, because a pinned
+    /// entry is exempt from the live cap: one below it, so a copy made after the
+    /// import still fits underneath. See `disarming` for the whole argument.
+    static var maxImportedPinnedItems: Int { maxItems - 1 }
     /// And a ceiling on the total inline text it may install, because every byte
     /// of it is re-encrypted on every copy for as long as it stays in the vault.
     static let maxImportedInlineBytes = 32 * 1024 * 1024
@@ -72,6 +80,8 @@ final class ClipboardStore: ObservableObject {
 
     private var autoBackupWork: DispatchWorkItem?
     private var noticeWork: DispatchWorkItem?
+    /// Kept so the observer can be taken down again; see `flushPendingWork`.
+    private var terminationObserver: NSObjectProtocol?
     private var thumbnailCache: [UUID: NSImage] = [:]
 
     private var autoBackupURL: URL {
@@ -93,15 +103,20 @@ final class ClipboardStore: ObservableObject {
 
     private static let shellTimeout: TimeInterval = 30
 
-    /// - Parameter enableSystemIntegration: pasteboard polling and global
-    ///   hotkeys. Off in tests, which have no business installing a system-wide
-    ///   hotkey or reacting to whatever the machine's clipboard happens to do.
+    /// - Parameter enableSystemIntegration: pasteboard polling, global hotkeys,
+    ///   and closing the panel or posting a keystroke when pasting for the user.
+    ///   Off in tests, which have no business installing a system-wide hotkey,
+    ///   reacting to whatever the machine's clipboard happens to do, or typing
+    ///   Command + V into whatever is frontmost on the machine running them.
     init(storage: EncryptedStorage = EncryptedStorage(),
          enableSystemIntegration: Bool = true,
          pasteboard: NSPasteboard = .general) {
         self.storage = storage
         self.systemIntegrationEnabled = enableSystemIntegration
         self.pasteboard = pasteboard
+        self.noticePresenter = enableSystemIntegration
+            ? { NoticeHUD.shared.show($0, for: ClipboardStore.noticeDuration) }
+            : { _ in }
 
         monitor.onNewContent = { [weak self] captured in
             self?.add(captured.payload, source: captured.sourceBundleID)
@@ -116,19 +131,99 @@ final class ClipboardStore: ObservableObject {
             unavailableSlots = GlobalHotkeyCenter.shared.register()
             registerOpenHotkey()
         }
+        // Observed here rather than in an application delegate, because the
+        // thing that has to be flushed is this object's queue and an
+        // `NSApplicationDelegateAdaptor` is built before the store exists, with
+        // no way to reach it. The Quit button calls `NSApplication.terminate`,
+        // which posts this and then exits.
+        //
+        // Outside the `enableSystemIntegration` gate, unlike the hotkeys and the
+        // pasteboard poller, for two reasons. Waiting for this store's own
+        // writes to reach this store's own vault is not system integration --
+        // it touches nothing outside the object -- and leaving it inside the
+        // gate meant the whole fix rested on an untested assumption about
+        // `addObserver(forName:object:queue:using:)`, which runs its block
+        // inline only when the posting thread's `OperationQueue.current` is the
+        // one given. If it enqueued instead, the process would exit before the
+        // block ran and this would be a no-op with no symptom. A test can post
+        // the notification now and watch the queue drain.
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.flushPendingWork()
+        }
         loadFromStorage()
+    }
+
+    deinit {
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(terminationObserver)
+        }
     }
 
     // MARK: Notices
 
-    /// Shown in the state strip for a few seconds. Only for outcomes the user
-    /// would otherwise never learn about.
+    /// How long a notice stays up, on either surface. One number so the strip
+    /// and the panel cannot disagree about when a message expires. Eight rather
+    /// than the old six because every one of these messages is two sentences and
+    /// ends in an instruction.
+    static let noticeDuration: TimeInterval = 8
+
+    /// Where a notice goes when no window is on screen to carry it.
+    ///
+    /// A stored closure rather than a direct call to `NoticeHUD`, for two
+    /// reasons. A test can watch it, which is the only way to hold the line that
+    /// a failed paste reaches the user -- that is the exact thing that was
+    /// broken. And a store built without system integration gets a closure that
+    /// does nothing, so a unit test never puts a window on the screen of the
+    /// machine running it, the same rule the pasteboard poller and the global
+    /// hotkeys follow.
+    var noticePresenter: (String) -> Void
+
+    /// How many state strips are mounted. The strip is the other surface for a
+    /// notice, and there is no point showing both.
+    private var stripsOnScreen = 0
+
+    /// Whether a notice needs the panel, given the two things that can be
+    /// observed about the strip.
+    ///
+    /// Pure, because getting it wrong in one direction is invisible. Showing a
+    /// panel while the strip is also up is a redundant message; *not* showing
+    /// one when the strip is not really there is the original bug back again. So
+    /// the rule demands both signals agree before it stays quiet, and the two
+    /// fail in opposite directions: `stripOnScreen` comes from SwiftUI's
+    /// `onAppear`/`onDisappear`, which can miss the disappearance, and
+    /// `appHasKeyWindow` is the signal `PasteService.stillHasFocus` documents as
+    /// the one that actually moves when the panel opens and closes.
+    static func noticeNeedsHUD(stripOnScreen: Bool, appHasKeyWindow: Bool) -> Bool {
+        !(stripOnScreen && appHasKeyWindow)
+    }
+
+    /// Called by `StateStrip` as it comes and goes.
+    func stateStripAppeared() { stripsOnScreen += 1 }
+    func stateStripDisappeared() { stripsOnScreen = max(0, stripsOnScreen - 1) }
+
+    /// Shown for a few seconds: in the state strip if the history panel is open,
+    /// and in a panel below the menu bar if it is not. Only for outcomes the
+    /// user would otherwise never learn about.
+    ///
+    /// Both, not one. The strip is the better place when the user is already
+    /// looking at the panel, and it is the only place a notice can be read at
+    /// leisure; but the three callers that matter most -- a direct paste, which
+    /// reports after the panel has been dismissed, a Quick Slot, which is a
+    /// global hotkey used with the panel closed, and a missing payload on either
+    /// path -- all speak to someone who is looking somewhere else entirely.
     func showNotice(_ text: String) {
         notice = text
         noticeWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.notice = nil }
         noticeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.noticeDuration, execute: work)
+
+        guard ClipboardStore.noticeNeedsHUD(stripOnScreen: stripsOnScreen > 0,
+                                            appHasKeyWindow: NSApplication.shared.keyWindow != nil)
+        else { return }
+        noticePresenter(text)
     }
 
     // MARK: Shortcuts
@@ -171,6 +266,43 @@ final class ClipboardStore: ObservableObject {
     /// Blocks until queued vault I/O has drained. Test support.
     func drainPendingWork() {
         ioQueue.sync {}
+    }
+
+    /// The longest quitting may wait for the vault to finish being written.
+    ///
+    /// Long enough for an index save and a payload write, which are milliseconds
+    /// each, plus room for an auto-backup that happened to be in flight; short
+    /// enough that a queue wedged on a Keychain prompt cannot turn Quit into a
+    /// hang. Missing the deadline costs the last copy, which is what this exists
+    /// to prevent -- but a Quit button that does nothing is worse, and the
+    /// timeout is the only thing that rules it out.
+    static let quitFlushTimeout: TimeInterval = 3
+
+    /// Waits, briefly, for queued vault writes to reach the disk.
+    ///
+    /// `add` enqueues the payload and `persist` enqueues the index onto a
+    /// `.utility` queue that can be seconds behind under load, and
+    /// `NSApplication.terminate` does not wait for either: copy something, quit
+    /// from the footer, and the index write died with the process while the
+    /// strip had already said the vault held it. Nothing in the app called this
+    /// before.
+    ///
+    /// Returns false if the deadline passed with work still queued, which is
+    /// logged rather than shown: by then the app is a moment from exiting and
+    /// there is no surface left to show anything on.
+    @discardableResult
+    func flushPendingWork(timeout: TimeInterval = ClipboardStore.quitFlushTimeout) -> Bool {
+        let drained = DispatchSemaphore(value: 0)
+        // The queue is serial, so a block enqueued now runs behind everything
+        // already on it. `.userInitiated` promotes what is waiting in front of
+        // it: the user asked for this and is watching the app fail to quit.
+        ioQueue.async(qos: .userInitiated) { drained.signal() }
+        guard drained.wait(timeout: .now() + timeout) == .success else {
+            NSLog("%@", "Clipvelope: vault writes had not finished \(timeout)s after quitting "
+                  + "was requested; exiting without them.")
+            return false
+        }
+        return true
     }
 
     private func loadFromStorage() {
@@ -239,6 +371,7 @@ final class ClipboardStore: ObservableObject {
         ignoredAppBundleIDs = state.ignoredAppBundleIDs
         captureSuspended = state.captureSuspended
         preferencesHotkey = state.preferencesHotkey
+        pasteDirectly = state.pasteDirectly
         if openHotkey != state.openHotkey {
             openHotkey = state.openHotkey
             registerOpenHotkey()
@@ -264,7 +397,8 @@ final class ClipboardStore: ObservableObject {
             ignoredAppBundleIDs: ignoredAppBundleIDs,
             captureSuspended: captureSuspended,
             openHotkey: openHotkey,
-            preferencesHotkey: preferencesHotkey
+            preferencesHotkey: preferencesHotkey,
+            pasteDirectly: pasteDirectly
         )
     }
 
@@ -277,6 +411,15 @@ final class ClipboardStore: ObservableObject {
 
     func setSkipConcealedContent(_ skip: Bool) {
         skipConcealedContent = skip
+        persistState()
+    }
+
+    /// Turns pasting for the user on or off. Granting Accessibility access is a
+    /// separate step and stays the user's: this only records that they want the
+    /// feature, and `PasteService` reports honestly when the permission is
+    /// missing rather than pasting nothing and saying nothing.
+    func setPasteDirectly(_ on: Bool) {
+        pasteDirectly = on
         persistState()
     }
 
@@ -355,22 +498,39 @@ final class ClipboardStore: ObservableObject {
         switch payload {
         case .text(let value):
             content = .text(value)
+        // The digest is taken here, the one place the payload bytes are already
+        // in hand, and never recomputed afterwards: hashing an item that is
+        // already in the vault would mean reading and decrypting its payload
+        // file, and doing that for the whole history at launch is exactly the
+        // cost the per-item payload layout exists to avoid. Entries written
+        // before this field existed keep a nil hash for good; see
+        // `ClipboardContent.ImageInfo.==` for how they de-duplicate.
         case .richText(let data, let plain, let type):
             content = .richText(.init(plainText: plain, byteCount: data.count,
-                                      typeIdentifier: type))
+                                      typeIdentifier: type,
+                                      contentHash: ClipboardContent.digest(data)))
             payloadBytes = data
         case .image(let data, let type, let width, let height):
             content = .image(.init(pixelWidth: width, pixelHeight: height,
-                                   byteCount: data.count, typeIdentifier: type))
+                                   byteCount: data.count, typeIdentifier: type,
+                                   contentHash: ClipboardContent.digest(data)))
             payloadBytes = data
         case .files(let urls):
             content = .files(urls.map { .init(path: $0.path) })
         }
 
-        let updated = HistoryPolicy.inserting(content, into: items, maxItems: maxItems,
+        let updated = HistoryPolicy.inserting(content, into: items, maxItems: Self.maxItems,
                                               maxPayloadBytes: maxPayloadBytes,
                                               id: id, source: source)
-        guard updated != items else { return }
+        // Unreachable now that `inserting` protects the entry it adds, and left
+        // here as the tripwire for it ever becoming reachable again: this
+        // returning quietly is exactly how a vault saturated with pinned rows
+        // swallowed every copy the user made without a word.
+        guard updated != items else {
+            NSLog("%@", "Clipvelope: a copy was not recorded -- the history policy returned "
+                  + "the list unchanged for a new entry. This should not happen.")
+            return
+        }
 
         // Write the payload before the index that names it. ioQueue is serial and
         // persist() enqueues onto it, so this ordering holds.
@@ -413,14 +573,29 @@ final class ClipboardStore: ObservableObject {
         var updated = items
         updated[index].isPinned.toggle()
         // Unpinning can put the list back over either cap.
-        replaceItems(with: HistoryPolicy.trimmed(updated, maxItems: maxItems,
+        replaceItems(with: HistoryPolicy.trimmed(updated, maxItems: Self.maxItems,
                                                  maxPayloadBytes: maxPayloadBytes))
     }
 
-    func copyToPasteboard(_ item: ClipboardItem) {
+    /// Puts `item` back on the pasteboard.
+    ///
+    /// `then` runs on the main queue once the pasteboard actually holds the
+    /// entry -- which is *not* when this function returns. An image and a
+    /// formatted paste both have to read their payload off `ioQueue` first, and
+    /// anything that acts on the copy having happened -- pasting it, above all
+    /// -- would otherwise act while the clipboard still held the previous
+    /// entry. Existing callers pass nothing and are unaffected.
+    ///
+    /// It fires on every path that ends with something on the pasteboard,
+    /// including the one where a formatted entry has lost its payload and falls
+    /// back to plain text. The single path it does not fire on is a missing
+    /// image payload, which copies nothing at all and deletes the row instead:
+    /// there is nothing there to paste.
+    func copyToPasteboard(_ item: ClipboardItem, then: (() -> Void)? = nil) {
         switch item.content {
         case .text(let value):
             copyText(value)
+            then?()
 
         case .richText(let info):
             // Put both renderings back, so a rich target keeps the formatting
@@ -432,6 +607,7 @@ final class ClipboardStore: ObservableObject {
                     DispatchQueue.main.async {
                         self.copyText(info.plainText)
                         self.showNotice("The formatting for that entry was missing, so plain text was copied.")
+                        then?()
                     }
                     return
                 }
@@ -441,12 +617,14 @@ final class ClipboardStore: ObservableObject {
                     self.pasteboard.clearContents()
                     self.pasteboard.setData(data, forType: type)
                     self.pasteboard.setString(info.plainText, forType: .string)
+                    then?()
                 }
             }
 
         case .files(let refs):
             pasteboard.clearContents()
             pasteboard.writeObjects(refs.map { URL(fileURLWithPath: $0.path) as NSURL })
+            then?()
 
         case .image:
             // The payload is a file now, so reading it is I/O.
@@ -469,9 +647,123 @@ final class ClipboardStore: ObservableObject {
                 DispatchQueue.main.async {
                     self.pasteboard.clearContents()
                     self.pasteboard.setData(data, forType: .png)
+                    then?()
                 }
             }
         }
+    }
+
+    /// Copies `item` with any formatting dropped.
+    ///
+    /// For a formatted entry that means the plain rendering already held in the
+    /// index, so the payload file is never read and nothing styled reaches the
+    /// pasteboard -- which is the point: pasting into a document that honours
+    /// RTF should be able to arrive as the document's own text. Every other
+    /// kind of entry has no formatting to drop and is copied exactly as usual.
+    ///
+    /// `then` has the same contract as `copyToPasteboard`'s.
+    func copyPlainText(_ item: ClipboardItem, then: (() -> Void)? = nil) {
+        guard case .richText(let info) = item.content else {
+            return copyToPasteboard(item, then: then)
+        }
+        copyText(info.plainText)
+        then?()
+    }
+
+    // MARK: Paste
+
+    /// Copies `item`, closes the history panel, and -- only if the user has
+    /// turned Paste Directly on -- pastes it into whatever they were doing.
+    ///
+    /// This is what the panel's Return key should call. With the setting off it
+    /// does exactly what choosing an entry has always done: copy, and close.
+    func copyAndMaybePaste(_ item: ClipboardItem) {
+        closePanelThenPaste({ self.copyToPasteboard(item, then: $0) })
+    }
+
+    /// The same, for a "Copy as Plain Text" action on a formatted entry.
+    func copyPlainTextAndMaybePaste(_ item: ClipboardItem) {
+        closePanelThenPaste({ self.copyPlainText(item, then: $0) })
+    }
+
+    /// The shared tail of both: dismiss the panel, run `copy`, and paste when
+    /// the copy has landed.
+    ///
+    /// The order is deliberate. The panel is closed *first*, before the copy,
+    /// because a formatted or image entry takes a trip to `ioQueue` and back
+    /// and the dismissal should be under way during it rather than after it.
+    /// The paste itself is hung off the copy's completion, so it can never
+    /// arrive while the clipboard still holds the previous entry.
+    ///
+    /// That completion is the reason the deadline is stamped *here*, before the
+    /// copy rather than inside `PasteService`. For a text entry the completion
+    /// is synchronous and the paste follows the keystroke at once; for an image
+    /// or a formatted entry it waits on `ioQueue`, which is serial and also
+    /// carries index saves, payload writes, `storage.clear()` and an auto-backup
+    /// that may serialise every payload in the vault. So the gap being bounded
+    /// is the one between the user pressing Return and the keystroke going out,
+    /// and only a clock started at the keystroke measures it. `PasteService`
+    /// cannot start that clock: by the time it is called the gap has already
+    /// happened.
+    ///
+    /// Closing the panel is `keyWindow.close()`, the same call the view makes,
+    /// and the wait for focus to come back lives in `PasteService`.
+    ///
+    /// Gated on `systemIntegrationEnabled` for the same reason the pasteboard
+    /// poller and the global hotkeys are: a unit test has no business closing
+    /// windows or posting keystrokes into the machine running it.
+    private func closePanelThenPaste(_ copy: ((() -> Void)?) -> Void) {
+        guard systemIntegrationEnabled else { return copy(nil) }
+
+        // Both stamps are taken here, before anything else happens, because both
+        // describe the same instant: the one the user acted in. `postBy` bounds
+        // when the keystroke may still go out; `destination` bounds where. The
+        // deadline alone never bounded the destination -- inside those two
+        // seconds the keystroke went to whatever was frontmost at post time, and
+        // switching applications takes a person about 300 milliseconds.
+        //
+        // Read before `close()` rather than after, though the panel does not
+        // move it: an LSUIElement app does not become frontmost by showing a
+        // window, so this already names the user's own application while the
+        // panel has the keyboard.
+        //
+        // It can still name Clipvelope, because `NSApp.activate` overrides that
+        // and `Views.swift` calls it for Preferences and for the Delete
+        // Everything alert. The stamp is left as it is rather than nulled here,
+        // so that `PasteService.refusal` can tell that case apart from "there
+        // was nothing to record" and say the true sentence for it.
+        let postBy = Date().addingTimeInterval(PasteService.postWindow)
+        let destination = PasteService.frontmostProcess
+
+        NSApplication.shared.keyWindow?.close()
+        guard pasteDirectly else { return copy(nil) }
+        copy({ [weak self] in
+            guard let self else { return }
+            // Sampled here, in the completion, because here is where the
+            // pasteboard is known to hold the entry. Anything that writes to it
+            // between now and the keystroke -- a Quick Slot command finishing
+            // with `copyText`, or any other application -- moves the count, and
+            // the paste is refused rather than pasting that other thing and
+            // reporting success by saying nothing.
+            let clipboard = pasteboard.changeCount
+            PasteService.pasteWhenFocusReturns(postBy: postBy,
+                                               destination: destination,
+                                               clipboard: clipboard) { outcome in
+                self.report(outcome)
+            }
+        })
+    }
+
+    /// Six outcomes, six answers -- and `PasteService.Outcome` holds the
+    /// sentences, so a new case cannot compile until someone has written one.
+    ///
+    /// The message goes wherever the user is: the state strip if the history
+    /// panel is open, a panel below the menu bar if it is not. The second is the
+    /// one that matters here, because this always runs after the panel has been
+    /// dismissed.
+    func report(_ outcome: PasteService.Outcome) {
+        guard let message = outcome.message else { return }
+        showNotice(message)
     }
 
     /// Loads and caches a small preview for an image item.
@@ -482,8 +774,14 @@ final class ClipboardStore: ObservableObject {
         guard case .image = item.content else { return completion(nil) }
 
         ioQueue.async { [weak self] in
+            // The same signature check `copyToPasteboard` makes, for the same
+            // reason and one line of it: `NSImage(data:)` hands the bytes to
+            // ImageIO, which will parse a great many formats, so an image row
+            // whose payload is not a PNG must not be decoded here either. It
+            // closes the class of problem rather than any one route to it.
             guard let self,
                   let data = try? storage.readPayload(for: item.id),
+                  data.starts(with: ClipboardMonitor.pngSignature),
                   let image = NSImage(data: data) else {
                 DispatchQueue.main.async { completion(nil) }
                 return
@@ -758,6 +1056,15 @@ final class ClipboardStore: ObservableObject {
         state.openHotkey = openHotkey
         state.preferencesHotkey = preferencesHotkey
 
+        // Pasting for the user means synthesising keystrokes into whatever they
+        // are doing, and it is the only feature here that needs Accessibility
+        // access. A backup that could switch it on would be arranging for that
+        // -- silently, on a Mac whose owner never asked for it, and on any Mac
+        // the file reaches. So the imported value is discarded outright and
+        // this Mac's own answer is kept, in both directions: a file may not
+        // turn it on, and may not turn off someone else's.
+        state.pasteDirectly = pasteDirectly
+
         // Where and whether this Mac writes its own backups is the user's
         // choice, not a setting a file gets to carry. A backup asking for
         // auto-backup would start mirroring the whole vault into ~/Documents
@@ -824,27 +1131,87 @@ final class ClipboardStore: ObservableObject {
                          + "left out: they point at files on the machine that wrote the backup.")
         }
 
+        // Last, so the rows already left out do not spend a pin.
+        //
+        // A pinned row is exempt from the history cap, so how many of them a file
+        // may install is not a matter of taste: at `maxItems` pinned rows the
+        // vault sits at its ceiling with nothing the cap is allowed to evict, and
+        // `HistoryPolicy`'s protection of the newest entry is then the only thing
+        // between the user and a copy that goes nowhere. `maxItems - 1` is the
+        // largest count that leaves the ordinary rule working unaided -- one copy
+        // still fits under the cap without displacing anything -- so that is the
+        // number, reached by arithmetic rather than by picking a round one.
+        //
+        // The surplus is imported *unpinned* rather than dropped. A restore that
+        // silently deletes entries is the failure this file is full of fixes for;
+        // unpinning keeps every entry the backup carried and merely returns them
+        // to the cap that governs everything else, which is where a
+        // thousand-entry import has always left them.
+        let pinnable = Self.maxImportedPinnedItems
+        let pinned = state.items.indices.filter { state.items[$0].isPinned }
+        if pinned.count > pinnable {
+            for index in pinned.dropFirst(pinnable) {
+                state.items[index].isPinned = false
+            }
+            let unpinned = pinned.count - pinnable
+            notes.append("\(unpinned) entr\(unpinned == 1 ? "y was" : "ies were") pinned beyond "
+                         + "the \(pinnable) a backup may pin, so \(unpinned == 1 ? "it was" : "they were") "
+                         + "imported unpinned. Pinned entries are never trimmed, and a history "
+                         + "made of nothing else has no room for what you copy next.")
+        }
+
         return (state, notes)
     }
 
     /// Whether a payload out of a backup is really the thing its item claims,
     /// and stays inside the limits capture enforces.
+    ///
+    /// A declared `contentHash` is part of that claim, and the strongest part of
+    /// it: everything else an item says about its payload is a property many
+    /// different payloads share, while the digest names one. An item whose hash
+    /// does not match the bytes filed under its id is not describing them, so
+    /// the payload is refused and the caller tells the user which entries went.
+    /// A backup written before the field existed declares no hash and is judged
+    /// exactly as it was before.
+    ///
+    /// The declared `byteCount` is part of the claim too, and unlike the hash it
+    /// is never absent -- every version of this app has written it, straight from
+    /// the length of the bytes it stored. It is only clamped on decode, so
+    /// nothing else stopped a backup filing a real 32 MB picture under an item
+    /// declaring `byteCount: 0`, and three separate things downstream believe
+    /// that number: `hasPayloadFile`, which decides whether the payload is
+    /// carried in the backups the user makes from then on; the byte budget in
+    /// `HistoryPolicy.trimmed`, which cannot evict weight it cannot see; and
+    /// `replaceItems`, which leaves the file on disk when the row goes. A claim
+    /// that does not match its bytes is refused here like any other.
     static func payloadIsAcceptable(_ data: Data, for content: ClipboardContent) -> Bool {
         switch content {
-        case .image:
+        case .image(let info):
             guard data.count <= ClipboardMonitor.maxImageBytes,
+                  info.byteCount == data.count,
                   data.starts(with: ClipboardMonitor.pngSignature),
                   let size = ClipboardMonitor.declaredPixelSize(of: data),
-                  ClipboardMonitor.acceptsImage(pixelWidth: size.0, pixelHeight: size.1)
+                  ClipboardMonitor.acceptsImage(pixelWidth: size.0, pixelHeight: size.1),
+                  hashMatches(data, declared: info.contentHash)
             else { return false }
             return true
-        case .richText:
+        case .richText(let info):
             return data.count <= ClipboardMonitor.maxRichTextBytes
+                && info.byteCount == data.count
+                && hashMatches(data, declared: info.contentHash)
         case .text, .files:
             // Neither keeps a payload file, so a payload claiming to be one is
             // not something this app wrote.
             return false
         }
+    }
+
+    /// True when no hash is declared, or the declared one is these bytes'.
+    /// Case-insensitive because the comparison is of a hex rendering, not of a
+    /// string this app is the only writer of.
+    private static func hashMatches(_ data: Data, declared: String?) -> Bool {
+        guard let declared else { return true }
+        return declared.lowercased() == ClipboardContent.digest(data)
     }
 
     private func importState(from url: URL, password: String?) {
@@ -869,14 +1236,51 @@ final class ClipboardStore: ObservableObject {
             let trust: BackupTrust = password == nil ? .deviceBound : .portable
             let snapshot = try Self.decodeSnapshot(decrypted)
 
+            // Two entries under one id make "the item claiming this id"
+            // ambiguous, and the two places that resolve it need not resolve it
+            // the same way: the payload check below keeps the first item with
+            // that id, while `disarming` afterwards drops items independently --
+            // for being oversized -- and `apply` keeps the first *survivor*. A
+            // file pairing an oversized rich-text item with an image under one
+            // id therefore has its payload judged against the rich-text claim,
+            // which only looks at a size ceiling, and the image is the one that
+            // reaches the vault: an image row whose bytes never faced the PNG
+            // signature, the declared pixel size, or `acceptsImage`.
+            //
+            // Refusing the whole file is the answer rather than re-checking
+            // after the filtering, because it is one rule to be sure of instead
+            // of an ordering to keep true forever. Nothing legitimate is lost: a
+            // vault is deduplicated before it is saved, so no backup this app
+            // has ever written has two items under one id.
+            let ids = snapshot.state.items.map(\.id)
+            guard Set(ids).count == ids.count else {
+                DispatchQueue.main.async {
+                    self.backupFailure = "That backup lists two entries under one identifier, "
+                        + "which no backup Clipvelope writes does, so none of it was imported. "
+                        + "Export a fresh backup from a vault you can still open."
+                }
+                return
+            }
+
             // Payload bytes come out of the file, and an image payload is decoded
             // later to draw a thumbnail. Capture checks a picture's declared size
             // before decoding it precisely so a small file cannot demand an
             // enormous raster; a backup is the same hostile input and gets the
             // same check, against what its own item claims to be.
+            //
+            // Judged here and written further down, after the main queue has had
+            // its say. They used to be written on the spot, which put them in
+            // `items/` moments before an import into a suspended vault moved
+            // `items/` aside: `quarantineUnreadableVault` takes the payload
+            // directory with the index, deliberately and correctly, so the
+            // pictures the import had just restored went into
+            // `items.unreadable-<stamp>` and the rows installed a breath later
+            // pointed at nothing. That is the recovery path failing at the one
+            // moment it is needed.
             let declared = Dictionary(snapshot.state.items.map { ($0.id, $0.content) },
                                       uniquingKeysWith: { first, _ in first })
             var rejected: Set<UUID> = []
+            var accepted: [UUID: Data] = [:]
             for (key, data) in snapshot.payloads {
                 guard let id = UUID(uuidString: key) else { continue }
                 guard let content = declared[id],
@@ -884,7 +1288,7 @@ final class ClipboardStore: ObservableObject {
                     rejected.insert(id)
                     continue
                 }
-                try? storage.writePayload(data, for: id)
+                accepted[id] = data
             }
 
             let imported = snapshot.state
@@ -914,6 +1318,27 @@ final class ClipboardStore: ObservableObject {
                     // the right key is back. A successful import replaces the vault,
                     // but it must not write over that file.
                     self.storage.quarantineUnreadableVault()
+                }
+                // Only now, with whatever was there already moved aside, and on
+                // the queue that owns the vault. `ioQueue` is serial and the
+                // `persist()` below enqueues the index behind these, so the
+                // payloads are on disk before anything names them -- the same
+                // ordering `add` keeps.
+                //
+                // Only the payloads of rows that actually reached the vault: an
+                // entry `disarming` left out has no row to be read through, so
+                // its bytes would sit in `items/` until some later launch swept
+                // them.
+                let live = Set(state.items.map(\.id))
+                let payloads = accepted.filter { live.contains($0.key) }
+                self.ioQueue.async {
+                    for (id, data) in payloads {
+                        do {
+                            try self.storage.writePayload(data, for: id)
+                        } catch {
+                            NSLog("%@", "Clipvelope: could not write imported payload for \(id): \(error)")
+                        }
+                    }
                 }
                 self.apply(state)
                 // A successful import is authoritative: it clears a suspended vault.

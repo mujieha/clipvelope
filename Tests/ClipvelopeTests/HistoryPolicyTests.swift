@@ -68,6 +68,36 @@ final class HistoryPolicyTests: XCTestCase {
         XCTAssertEqual(HistoryPolicy.trimmed(items, maxItems: 1), items)
     }
 
+    /// The entry that has just been inserted is never the one evicted, however
+    /// full the list is and however much of it is pinned. Without this, a list of
+    /// nothing but pinned rows at the cap makes the new entry the only candidate
+    /// the loop can see, so it goes straight back out and the caller is handed
+    /// the list it passed in -- which is how a copy came to be dropped silently.
+    func testTheEntryJustInsertedIsNeverTheOneEvicted() {
+        let full = (0..<3).map { item("pinned \($0)", pinned: true) }
+        let result = HistoryPolicy.inserting("just copied", into: full, maxItems: 3)
+        XCTAssertEqual(result.first?.searchText, "just copied")
+        XCTAssertEqual(result.count, 4, "one row above the cap, and no further")
+
+        // The next copy protects itself instead, which makes its predecessor an
+        // ordinary candidate again: the list cannot climb.
+        let next = HistoryPolicy.inserting("copied next", into: result, maxItems: 3)
+        XCTAssertEqual(next.first?.searchText, "copied next")
+        XCTAssertEqual(next.count, 4)
+        XCTAssertFalse(next.contains { $0.searchText == "just copied" })
+    }
+
+    /// The byte budget cannot starve it either.
+    func testTheEntryJustInsertedSurvivesTheByteBudget() {
+        let heavy = [image(1_000, pinned: true), image(1_000, pinned: true)]
+        let result = HistoryPolicy.inserting(.image(.init(pixelWidth: 1, pixelHeight: 1,
+                                                          byteCount: 10,
+                                                          typeIdentifier: "public.png")),
+                                             into: heavy, maxItems: 200, maxPayloadBytes: 100)
+        XCTAssertEqual(result.count, 3)
+        XCTAssertEqual(result.first?.payloadByteCount, 10)
+    }
+
     func testInsertingRespectsCapacityAndPins() {
         let items = [item("x"), item("keep", pinned: true)]
         let result = HistoryPolicy.inserting("new", into: items, maxItems: 2)
@@ -106,6 +136,55 @@ final class HistoryPolicyTests: XCTestCase {
     func testTrimmingStopsWhenOnlyPinnedItemsRemainRatherThanLooping() {
         let items = [image(100, pinned: true), image(100, pinned: true)]
         XCTAssertEqual(HistoryPolicy.trimmed(items, maxItems: 1, maxPayloadBytes: 1), items)
+    }
+
+    // MARK: - Telling two pictures apart
+
+    private func imageContent(hash: String?) -> ClipboardContent {
+        .image(.init(pixelWidth: 1920, pixelHeight: 1080, byteCount: 40_000,
+                     typeIdentifier: "public.png", contentHash: hash))
+    }
+
+    private func imageItem(hash: String?, at date: Date = Date()) -> ClipboardItem {
+        ClipboardItem(id: UUID(), createdAt: date, isPinned: false,
+                      content: imageContent(hash: hash), sourceBundleID: nil)
+    }
+
+    /// Two screenshots of the same window share their size, type and often their
+    /// compressed byte count. Before the digest, the second was discarded and the
+    /// user was shown the first one's pixels under a fresh timestamp.
+    func testTwoDifferentImagesWithIdenticalMetadataStayTwoEntries() {
+        let first = imageItem(hash: ClipboardContent.digest(compressiblePNG(width: 4, height: 4)))
+        let second = imageContent(hash: ClipboardContent.digest(compressiblePNG(width: 4, height: 5)))
+        let result = HistoryPolicy.inserting(second, into: [first], maxItems: 200)
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(result[0].content, second)
+        XCTAssertEqual(result[1].id, first.id)
+    }
+
+    func testRecopyingTheSameImageStillDeduplicatesAndRefreshesItsTime() {
+        let hash = ClipboardContent.digest(compressiblePNG(width: 4, height: 4))
+        let old = Date(timeIntervalSince1970: 1_000)
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let existing = imageItem(hash: hash, at: old)
+        let result = HistoryPolicy.inserting(imageContent(hash: hash), into: [existing],
+                                             maxItems: 200, now: now)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].id, existing.id)
+        XCTAssertEqual(result[0].createdAt, now)
+    }
+
+    /// The old-vault fallback, and the reason for it: entries already on disk
+    /// have no hash and are never given one, so without this they would each gain
+    /// a duplicate the first time the user re-copied them after upgrading.
+    func testAnImageFromAnOldVaultStillDeduplicatesAgainstItsRecopy() {
+        let legacy = imageItem(hash: nil, at: Date(timeIntervalSince1970: 1_000))
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let recopied = imageContent(hash: ClipboardContent.digest(compressiblePNG(width: 4, height: 4)))
+        let result = HistoryPolicy.inserting(recopied, into: [legacy], maxItems: 200, now: now)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].id, legacy.id)
+        XCTAssertEqual(result[0].createdAt, now)
     }
 
     func testDifferentContentKindsAreNotTreatedAsDuplicates() {

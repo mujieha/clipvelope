@@ -95,6 +95,18 @@ final class PanelModelTests: XCTestCase {
                       isPinned: pinned, content: .text(text), sourceBundleID: nil)
     }
 
+    private func imageItem() -> ClipboardItem {
+        ClipboardItem(id: UUID(), createdAt: now, isPinned: false,
+                      content: .image(.init(pixelWidth: 1, pixelHeight: 1, byteCount: 1,
+                                            typeIdentifier: "public.png")),
+                      sourceBundleID: nil)
+    }
+
+    private func filesItem(_ path: String) -> ClipboardItem {
+        ClipboardItem(id: UUID(), createdAt: now, isPinned: false,
+                      content: .files([.init(path: path)]), sourceBundleID: nil)
+    }
+
     func testAnEmptyOrBlankQueryShowsEverything() {
         let items = [item("a"), item("b")]
         var panel = PanelModel()
@@ -124,6 +136,60 @@ final class PanelModelTests: XCTestCase {
     func testNoMoreThanFiftyRowsAreShown() {
         let items = (0..<80).map { item("row \($0)") }
         XCTAssertEqual(PanelModel().visibleItems(in: items, now: now, calendar: calendar).count, 50)
+    }
+
+    func testNothingIsHiddenWhileTheHistoryFitsInThePanel() {
+        let items = (0..<(PanelModel.maxVisibleRows - 1)).map { item("row \($0)") }
+        XCTAssertEqual(PanelModel().hiddenCount(in: items), 0)
+        XCTAssertNil(PanelModel().overflowNotice(in: items))
+    }
+
+    func testNothingIsHiddenAtExactlyTheRowCap() {
+        let items = (0..<PanelModel.maxVisibleRows).map { item("row \($0)") }
+        XCTAssertEqual(PanelModel().hiddenCount(in: items), 0)
+        XCTAssertNil(PanelModel().overflowNotice(in: items))
+    }
+
+    func testTheHiddenCountIsEverythingPastTheRowCap() {
+        let total = PanelModel.maxVisibleRows + 123
+        let items = (0..<total).map { item("row \($0)") }
+        XCTAssertEqual(PanelModel().hiddenCount(in: items), 123)
+        XCTAssertEqual(PanelModel().overflowNotice(in: items),
+                       "\(PanelModel.maxVisibleRows) of \(total) shown. Type to search the rest.")
+    }
+
+    func testHiddenMatchesAreCountedNotHiddenItems() {
+        var items = (0..<PanelModel.maxVisibleRows).map { item("row \($0)") }
+        items += (0..<20).map { item("needle \($0)") }
+        var panel = PanelModel()
+        panel.setQuery("needle")
+        // The history overflows the panel; the matches do not, so nothing the
+        // user is looking at is missing.
+        XCTAssertEqual(panel.hiddenCount(in: items), 0)
+        XCTAssertNil(panel.overflowNotice(in: items))
+    }
+
+    func testASearchThatStillOverflowsCountsItsOwnMatches() {
+        let matching = PanelModel.maxVisibleRows + 41
+        var items = (matching..<(matching + 30)).map { item("row \($0)") }
+        items += (0..<matching).map { item("needle \($0)") }
+        var panel = PanelModel()
+        panel.setQuery("needle")
+        XCTAssertEqual(panel.hiddenCount(in: items), 41)
+        XCTAssertEqual(panel.overflowNotice(in: items),
+                       "\(PanelModel.maxVisibleRows) of \(matching) matches shown. Keep typing to narrow it.")
+    }
+
+    func testOverflowLeavesTheDrawnRowsAndTheSelectionAlone() {
+        let items = (0..<(PanelModel.maxVisibleRows + 123)).map { item("row \($0)") }
+        var panel = PanelModel()
+        let visible = panel.visibleItems(in: items, now: now, calendar: calendar)
+        XCTAssertEqual(visible.count, PanelModel.maxVisibleRows)
+        // The hint is not a row: Down at the last real row must stay there.
+        panel.move(PanelModel.maxVisibleRows, rowCount: visible.count)
+        XCTAssertEqual(panel.selection, PanelModel.maxVisibleRows - 1)
+        panel.move(1, rowCount: visible.count)
+        XCTAssertEqual(panel.selection, PanelModel.maxVisibleRows - 1)
     }
 
     func testMoveClampsToTheEnds() {
@@ -175,6 +241,68 @@ final class PanelModelTests: XCTestCase {
         XCTAssertEqual(panel.suggestion(in: items), "Kubectl apply")
         panel.setQuery("image")
         XCTAssertNil(panel.suggestion(in: items), "images are never suggested")
+    }
+
+    func testSearchFoldsCaseInBothDirections() {
+        let items = [item("Deploy Staging"), item("helm upgrade")]
+        var panel = PanelModel()
+        panel.setQuery("deploy")
+        XCTAssertEqual(panel.matches(in: items).map(\.searchText), ["Deploy Staging"],
+                       "a lowercase query finds a capitalised entry")
+        panel.setQuery("HELM")
+        XCTAssertEqual(panel.matches(in: items).map(\.searchText), ["helm upgrade"],
+                       "an uppercase query finds a lowercase entry")
+    }
+
+    func testSearchIgnoresDiacritics() {
+        let items = [item("résumé final"), item("resume draft")]
+        var panel = PanelModel()
+        panel.setQuery("resume")
+        XCTAssertEqual(panel.matches(in: items).map(\.searchText), ["résumé final", "resume draft"],
+                       "an unaccented query finds the accented entry")
+        panel.setQuery("résumé")
+        XCTAssertEqual(panel.matches(in: items).map(\.searchText), ["résumé final", "resume draft"],
+                       "an accented query finds the unaccented entry")
+    }
+
+    func testAQueryNothingContainsMatchesNothing() {
+        let items = [item("kubectl get pods"), item("helm upgrade")]
+        var panel = PanelModel()
+        panel.setQuery("terraform")
+        XCTAssertEqual(panel.matches(in: items), [])
+    }
+
+    func testASuggestionCandidateShorterThanTheQueryDoesNotMatch() {
+        let items = [item("kub"), item("kubectl apply")]
+        var panel = PanelModel()
+        panel.setQuery("kubectl")
+        XCTAssertEqual(panel.suggestion(in: items), "kubectl apply",
+                       "the short entry is skipped, not read past its end")
+    }
+
+    func testASuggestionIsFoundWhateverTheCaseAndAccents() {
+        var panel = PanelModel()
+        panel.setQuery("KUBE")
+        XCTAssertEqual(panel.suggestion(in: [item("kubectl get")]), "kubectl get")
+        panel.setQuery("resume")
+        XCTAssertEqual(panel.suggestion(in: [item("résumé final")]), "résumé final")
+    }
+
+    func testASuggestionSkipsEarlierTextThatDoesNotStartWithTheQuery() {
+        let items = [item("helm upgrade"), item("kubectl get"), item("kubectl apply")]
+        var panel = PanelModel()
+        panel.setQuery("kubectl ")
+        XCTAssertEqual(panel.suggestion(in: items), "kubectl get",
+                       "the newest matching text entry wins, earlier non-matches are passed over")
+    }
+
+    func testNothingIsSuggestedWhenOnlyImagesAndFilesCouldMatch() {
+        let items = [imageItem(), filesItem("/tmp/report.pdf")]
+        var panel = PanelModel()
+        panel.setQuery("report")
+        XCTAssertEqual(panel.matches(in: items).map(\.searchText), ["report.pdf"],
+                       "a file name is still searchable")
+        XCTAssertNil(panel.suggestion(in: items), "but neither an image nor a file can be typed")
     }
 }
 

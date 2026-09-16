@@ -18,11 +18,42 @@ jobs:
     # Clipvelope targets macOS 26, which needs the Xcode 26 SDK. Swift checks
     # availability against the deployment target, so an older image cannot build
     # this at all -- it is not merely a runtime concern.
-    runs-on: macos-26
+    #
+    # Why this is a matrix over the OS. macOS 26 is the declared floor and macOS
+    # 27 is what users are actually on, and they are not interchangeable: this
+    # project shipped a commit that was green here and, on 27, opened nothing at
+    # all. SwiftUI's MenuBarExtra stopped wiring its status item's target and
+    # action there, so the hotkey and `--open` -- the only two ways into the app
+    # -- became silent no-ops while every check on 26 passed. Running the UI
+    # smoke test on both is what catches that class of regression.
+    #
+    # macos-27 does not exist as a runner label yet. At the time of writing,
+    # actions/runner-images publishes macos-26 as the newest macOS image; the
+    # `xcode-27` image is Xcode 27 on an older macOS, which tests the SDK and not
+    # the operating system, so it is not a substitute. The entry is written out
+    # below and commented, so turning it on is a one-line change when the image
+    # ships. Do not uncomment it before then: an unavailable label does not skip
+    # the job, it fails the workflow.
+    #
+    # fail-fast is off so that a failure on one OS still reports the other, which
+    # is the whole point of running both.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-26
+          # - macos-27
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
 
     steps:
+      # Full history and tags: "Build number is ahead of the last release"
+      # compares against the most recent release tag, and the default shallow
+      # checkout fetches neither.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Toolchain
         run: |
@@ -34,8 +65,12 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
-          restore-keys: ${{ runner.os }}-spm-
+          # Keyed on the image, not just on runner.os: a .build directory from a
+          # different macOS carries modules built against a different SDK, and
+          # restoring one across images is how a cache turns into a mystery
+          # build failure.
+          key: ${{ matrix.runner }}-spm-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          restore-keys: ${{ matrix.runner }}-spm-
 
       # The deployment target lives in two places, and this repository has
       # already shipped a tree where they disagreed and nothing compiled.
@@ -58,6 +93,42 @@ jobs:
           set -euo pipefail
           ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
           grep -q "^## $ver" CHANGELOG.md || { echo "CHANGELOG.md has no '## $ver' section"; exit 1; }
+
+      # Sparkle compares CFBundleVersion, not the version string. A release that
+      # bumps the version and leaves the build number alone is never offered to
+      # anyone running the previous one, and Sparkle fails silently -- their app
+      # goes on looking current. Only this one check of `make preflight` runs
+      # here; dist/ and the working tree are meaningless on a runner.
+      - name: Build number is ahead of the last release
+        run: |
+          set -euo pipefail
+          tag=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$tag" ]; then
+            echo "no release tag in this clone; nothing to compare against"
+            exit 0
+          fi
+          tmp=$(mktemp)
+          trap 'rm -f "$tmp"' EXIT
+          git show "$tag:Resources/Info.plist" > "$tmp"
+          ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+          build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Resources/Info.plist)
+          tagged_ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$tmp")
+          tagged_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$tmp")
+          echo "$tag shipped $tagged_ver (build $tagged_build); this tree is $ver (build $build)"
+          if [ "$ver" = "$tagged_ver" ]; then
+            echo "the version has not been bumped since $tag; nothing to check"
+            exit 0
+          fi
+          case "$build" in
+            ''|*[!0-9]*) echo "CFBundleVersion '$build' is not an integer"; exit 1 ;;
+          esac
+          case "$tagged_build" in
+            ''|*[!0-9]*) echo "$tag shipped CFBundleVersion '$tagged_build', not an integer"; exit 1 ;;
+          esac
+          if [ "$build" -le "$tagged_build" ]; then
+            echo "CFBundleVersion $build must be greater than $tagged_build, which $tag shipped"
+            exit 1
+          fi
 
       # Deliberately not SwiftLint or SwiftFormat. Those need a toolchain
       # dependency and mostly produce style opinions; the compiler already runs
@@ -128,6 +199,18 @@ jobs:
           plist="$APP/Contents/Info.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "com.mujieha.Clipvelope"
+          # This key must stay out. 0.2.0 briefly carried it to stop two copies
+          # fighting over the global hotkeys, but Launch Services enforces it
+          # per machine rather than per login session: while one user had
+          # Clipvelope running, a second logged-in user could not launch it at
+          # all (-10829, kLSMultipleSessionsNotSupportedErr). Single instance is
+          # enforced inside the session now, in SingleInstance. Putting the key
+          # back would lock out everyone else on a shared Mac, and it is the
+          # kind of change that looks harmless in a diff.
+          if /usr/libexec/PlistBuddy -c 'Print :LSMultipleInstancesProhibited' "$plist" >/dev/null 2>&1; then
+            echo "LSMultipleInstancesProhibited is back: it stops a second logged-in user launching the app"
+            exit 1
+          fi
 
           # The icon is compiled from Resources/Clipvelope.icon by bundle.sh. A
           # mismatch between Info.plist and the files shows up as a blank generic
@@ -170,6 +253,9 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: Clipvelope-app
+          # One name per image. Two matrix jobs uploading under one name is an
+          # error, so the name has to carry the image for the second entry to be
+          # switchable without also fixing this.
+          name: Clipvelope-app-${{ matrix.runner }}
           path: dist/Clipvelope.app
           if-no-files-found: error
