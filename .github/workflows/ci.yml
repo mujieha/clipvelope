@@ -44,24 +44,14 @@ jobs:
           - macos-26
           # - macos-27
           #
-          # Turning that line on is half the change. A matrix job reports as
-          # "build-and-test (<runner>)" -- the matrix value is part of the check
-          # name -- so a new runner adds a *new* check that main does not
-          # require, and macOS 27 could then fail without blocking a merge.
-          # Require it in the same commit:
-          #
-          #   gh api -X PATCH \
-          #     repos/mujieha/clipvelope/branches/main/protection/required_status_checks \
-          #     --input - <<'JSON'
-          #   {"strict": false, "checks": [{"context": "build-and-test (macos-26)"},
-          #                                {"context": "build-and-test (macos-27)"}]}
-          #   JSON
-          #
-          # The reverse mistake is worse and this project has already made it:
-          # requiring a context that nothing reports blocks every pull request
-          # for good, whether or not CI passed, and the only way past is --admin,
-          # which is no gate at all. So require the check after the job exists,
-          # never before.
+          # Uncommenting that line is only half the change. A matrix job reports
+          # as "build-and-test (<runner>)" -- the matrix value is part of the
+          # check name -- so adding a runner adds a check name nothing yet
+          # requires, and the new OS could fail without blocking anything. The
+          # branch's required checks have to be updated in the same commit, and
+          # only ever after the job exists: requiring a check that nothing
+          # reports blocks every pull request for good, whether or not CI
+          # passed.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
 
