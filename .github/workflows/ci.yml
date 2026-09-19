@@ -43,6 +43,15 @@ jobs:
         runner:
           - macos-26
           # - macos-27
+          #
+          # Uncommenting that line is only half the change. A matrix job reports
+          # as "build-and-test (<runner>)" -- the matrix value is part of the
+          # check name -- so adding a runner adds a check name nothing yet
+          # requires, and the new OS could fail without blocking anything. The
+          # branch's required checks have to be updated in the same commit, and
+          # only ever after the job exists: requiring a check that nothing
+          # reports blocks every pull request for good, whether or not CI
+          # passed.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
 
