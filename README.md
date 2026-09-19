@@ -44,7 +44,7 @@ Releases are signed with a Developer ID and notarized by Apple, so macOS opens
 them without a warning. Updates arrive through the app itself.
 
 ## Requirements
-- macOS 26 (Tahoe)
+- macOS 26 (Tahoe) or later
 - Xcode 26+, only to build from source
 
 ## Build & Run (Xcode)

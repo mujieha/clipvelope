@@ -1,8 +1,15 @@
 # Contributing
 
-Clipvelope targets **macOS 26 only** and builds with Swift Package Manager and
-the Xcode 26 toolchain. There are no compatibility shims for older systems, and
-pull requests adding them will be declined.
+Clipvelope runs on **macOS 26 or later** and builds with Swift Package Manager
+and the Xcode 26 toolchain. 26 is a floor, not a target: it is the oldest system
+the app supports and every later one is supported too. There are no
+compatibility shims for anything older, and pull requests adding them will be
+declined.
+
+The floor is enforced by the compiler rather than by convention. `Package.swift`
+declares `.macOS("26.0")`, `LSMinimumSystemVersion` is `26.0`, and CI checks the
+two agree, so there is not a single `#available` in the tree — anything that
+needed one would not compile.
 
 ```bash
 make test     # the XCTest suite; points DEVELOPER_DIR at Xcode for XCTest
