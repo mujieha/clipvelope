@@ -3,6 +3,10 @@
 Local‑only macOS clipboard manager with encrypted storage.
 
 <p align="center">
+  <a href="docs/media/clipvelope-intro.mp4"><img src="docs/media/clipvelope-intro.gif" width="720" alt="Clipvelope in 16 seconds: copied items fill the encrypted history, Control + Option + V opens it from any app, typing filters it, and Return copies the item back"></a>
+</p>
+
+<p align="center">
   <img src="docs/images/panel.png" height="440" alt="The history panel: recent items grouped by time, with keyboard shortcuts">
   &nbsp;&nbsp;
   <img src="docs/images/preferences.png" height="440" alt="Preferences: theme, launch at login, and the keyboard shortcuts">
