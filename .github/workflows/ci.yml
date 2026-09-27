@@ -27,32 +27,36 @@ jobs:
     # -- became silent no-ops while every check on 26 passed. Running the UI
     # smoke test on both is what catches that class of regression.
     #
-    # macos-27 does not exist as a runner label yet. At the time of writing,
-    # actions/runner-images publishes macos-26 as the newest macOS image; the
-    # `xcode-27` image is Xcode 27 on an older macOS, which tests the SDK and not
-    # the operating system, so it is not a substitute. The entry is written out
-    # below and commented, so turning it on is a one-line change when the image
-    # ships. Do not uncomment it before then: an unavailable label does not skip
-    # the job, it fails the workflow.
+    # macOS 27 comes from the `xcode-27` label. GitHub now names its macOS
+    # images after the Xcode major rather than the OS, and since 2026-07 that
+    # image runs on macOS 27 (arm64 only). It is a public preview, so its job
+    # is allowed to fail without failing the workflow; the "OS under test" step
+    # below makes sure it really is 27 rather than trusting the label.
+    #
+    # The required check is still "build-and-test (macos-26)" only. A matrix job
+    # reports as "build-and-test (<runner>)", so this adds a check name nothing
+    # requires yet. Require "build-and-test (xcode-27)" on main only once the
+    # image leaves preview and the job has been green for a while -- and never
+    # before the job exists: requiring a check that nothing reports blocks every
+    # pull request for good.
     #
     # fail-fast is off so that a failure on one OS still reports the other, which
     # is the whole point of running both.
     strategy:
       fail-fast: false
       matrix:
-        runner:
-          - macos-26
-          # - macos-27
-          #
-          # Uncommenting that line is only half the change. A matrix job reports
-          # as "build-and-test (<runner>)" -- the matrix value is part of the
-          # check name -- so adding a runner adds a check name nothing yet
-          # requires, and the new OS could fail without blocking anything. The
-          # branch's required checks have to be updated in the same commit, and
-          # only ever after the job exists: requiring a check that nothing
-          # reports blocks every pull request for good, whether or not CI
-          # passed.
+        include:
+          - runner: macos-26
+            os-major: "26"
+            preview: false
+          - runner: xcode-27
+            os-major: "27"
+            preview: true
+    # Named explicitly: an include-only matrix would otherwise put every matrix
+    # value in the job name, renaming the required check out from under main.
+    name: build-and-test (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.preview }}
     timeout-minutes: 30
 
     steps:
@@ -63,6 +67,15 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+
+      - name: OS under test
+        run: |
+          major="$(sw_vers -productVersion | cut -d. -f1)"
+          echo "macOS $(sw_vers -productVersion) on ${{ matrix.runner }}"
+          if [ "$major" != "${{ matrix.os-major }}" ]; then
+            echo "::error::expected macOS ${{ matrix.os-major }}, runner has $major"
+            exit 1
+          fi
 
       - name: Toolchain
         run: |
