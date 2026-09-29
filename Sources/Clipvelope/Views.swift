@@ -160,7 +160,9 @@ struct StorageFailureBanner: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.12))
+        // Opaque base under the tint for the same reason as StateStrip: the
+        // window is vibrant, and a bare tint shows the window behind.
+        .background(Color(NSColor.controlBackgroundColor).overlay(Color.orange.opacity(0.12)))
     }
 }
 
@@ -510,8 +512,16 @@ struct StateStrip: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity)
-        .background(content.degraded ? Color.orange.opacity(0.12)
-                                     : Color(NSColor.controlBackgroundColor))
+        // The orange tint is translucent, and the panel's window is vibrant,
+        // so on its own the tint coloured whatever window sat behind the
+        // panel: over a white document the strip became a pale band in an
+        // otherwise dark panel. Paint the same opaque base every other row
+        // paints and lay the tint over that, so it tints the panel and not
+        // the desktop.
+        .background(
+            Color(NSColor.controlBackgroundColor)
+                .overlay(content.degraded ? Color.orange.opacity(0.12) : Color.clear)
+        )
         // So the store knows whether this strip is on screen to carry a notice,
         // and can put one below the menu bar instead when it is not. See
         // `ClipboardStore.noticeNeedsHUD`, which deliberately does not trust

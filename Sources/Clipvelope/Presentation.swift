@@ -242,7 +242,9 @@ struct StripContent: Equatable {
         }
         var parts: [String] = []
         if capturePaused { parts.append("Capture paused.") }
-        if recordingPasswords { parts.append("Recording passwords.") }
+        // Not "recording": capture of concealed content is something the user
+        // switched on and confirmed, so the line reminds rather than accuses.
+        if recordingPasswords { parts.append("Capturing passwords.") }
         if !parts.isEmpty {
             return StripContent(symbol: capturePaused ? "pause.circle.fill" : "exclamationmark.shield.fill",
                                 text: parts.joined(separator: " "), degraded: true)
