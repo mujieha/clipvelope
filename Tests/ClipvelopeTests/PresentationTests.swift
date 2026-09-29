@@ -338,7 +338,10 @@ final class StripContentTests: XCTestCase {
         XCTAssertEqual(strip(savingPaused: true, capturePaused: true, notice: "Removed.").text, "Removed.")
         XCTAssertEqual(strip(savingPaused: true, capturePaused: true).text, "Saving paused.")
         XCTAssertEqual(strip(capturePaused: true, recordingPasswords: true).text,
-                       "Capture paused. Recording passwords.")
+                       "Capture paused. Capturing passwords.")
+        // "Recording" overstated it: nothing is taken that the user did not
+        // switch on, and the line says so instead of sounding like an alarm.
+        XCTAssertEqual(strip(recordingPasswords: true).text, "Capturing passwords.")
         XCTAssertEqual(strip(recordingPasswords: true).symbol, "exclamationmark.shield.fill")
         XCTAssertTrue(strip(recordingPasswords: true).degraded)
     }
