@@ -22,6 +22,21 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Clipvelope"
 
+# The linker leaves debug-symbol entries in the executable that name every
+# object file by its absolute path on the build machine, so a shipped binary
+# carried "/Users/<account>/..." once per source file -- the builder's account
+# name, to anyone who runs `strings`. 0.1.0 and 0.2.0 shipped that way. Strip
+# the debug symbols before signing (a signature seals the file, so this cannot
+# come later), then refuse to go on if any home path is still in there: the
+# leak was invisible for two releases precisely because nothing looked.
+strip -S "$APP/Contents/MacOS/Clipvelope"
+if LC_ALL=C grep -a -q '/Users/' "$APP/Contents/MacOS/Clipvelope"; then
+    echo "error: the executable still contains a /Users/ path after stripping:" >&2
+    LC_ALL=C grep -a -o '/Users/[^[:cntrl:]]*' "$APP/Contents/MacOS/Clipvelope" | head -3 >&2
+    exit 1
+fi
+echo "stripped debug symbols; no build paths in the executable"
+
 # Sparkle, only when the binary actually links against it. SwiftPM links but
 # knows nothing about app bundles, so the framework has to be copied in and the
 # executable's runpath pointed at it.
