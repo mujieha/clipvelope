@@ -3,6 +3,15 @@
 Release notes for Clipvelope. Sparkle shows the section for a version in its
 update prompt; `make appcast` takes it from here.
 
+## 0.2.2
+
+### Fixed
+
+- The shipped app no longer contains the paths of the machine it was built on.
+  Earlier releases carried the builder's home directory in the executable's
+  debug symbols; the build now strips them and refuses to package a binary
+  that still names one.
+
 ## 0.2.1
 
 ### Fixed
