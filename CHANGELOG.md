@@ -3,7 +3,7 @@
 Release notes for Clipvelope. Sparkle shows the section for a version in its
 update prompt; `make appcast` takes it from here.
 
-## Unreleased
+## 0.2.1
 
 ### Fixed
 
