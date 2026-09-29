@@ -3,6 +3,17 @@
 Release notes for Clipvelope. Sparkle shows the section for a version in its
 update prompt; `make appcast` takes it from here.
 
+## 0.2.1
+
+### Fixed
+
+- The status line under the list showed the window behind the panel through
+  its orange tint, so over a white document it became a pale band in an
+  otherwise dark panel. It now sits on the same solid background as the rows.
+- While sensitive-content capture is on, the status line says "Capturing
+  passwords" instead of "Recording passwords", which
+  overstated what was happening.
+
 ## 0.2.0
 
 ### New
